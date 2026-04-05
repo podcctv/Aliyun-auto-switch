@@ -66,5 +66,15 @@ jobs:
           INTL_ACCESS_KEY_SECRET: ${{ secrets.INTL_ACCESS_KEY_SECRET }}
           INTL_INSTANCE_ID: ${{ secrets.INTL_INSTANCE_ID }}
           INTL_REGION_ID: ${{ secrets.INTL_REGION_ID }}
+          ALIYUN_CDT_NAME: ${{ secrets.ALIYUN_CDT_NAME }}
+          ALIYUN_CDT_PROGRESS_BAR: ${{ secrets.ALIYUN_CDT_PROGRESS_BAR }}
+          ALIYUN_CDT_PROGRESS_PERCENT: ${{ secrets.ALIYUN_CDT_PROGRESS_PERCENT }}
+          ALIYUN_CDT_USAGE: ${{ secrets.ALIYUN_CDT_USAGE }}
+          ALIYUN_CDT_REGION_NAME: ${{ secrets.ALIYUN_CDT_REGION_NAME }}
+          ALIYUN_CDT_EXPIRES_AT: ${{ secrets.ALIYUN_CDT_EXPIRES_AT }}
+          ALIYUN_CDT_SECURITY_GROUP_STATUS: ${{ secrets.ALIYUN_CDT_SECURITY_GROUP_STATUS }}
+          CN_TRAFFIC_USAGE: ${{ secrets.CN_TRAFFIC_USAGE }}
+          INTL_TRAFFIC_USAGE: ${{ secrets.INTL_TRAFFIC_USAGE }}
+          TRAFFIC_LIMIT_GB: ${{ secrets.TRAFFIC_LIMIT_GB }}
         run: |
           python scripts/ecs_switch.py

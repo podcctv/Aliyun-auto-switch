@@ -11,6 +11,7 @@
 2. 切换时先确保目标机器开机成功。
 3. 再执行另一台关机并确认成功。
 4. 把执行结果推送到 Telegram。
+5. 若待开机实例流量达到阈值（默认 `180GB`），触发流量保护：该实例保持关机，待流量回落后再恢复自动开机。
 
 ---
 
@@ -134,5 +135,20 @@ export ALIYUN_CDT_REGION_NAME="中国香港"
 export ALIYUN_CDT_EXPIRES_AT="2099-12-31 15:59:00"
 export ALIYUN_CDT_SECURITY_GROUP_STATUS="启用"
 
+# 可选：用于展示国内站/国际站各自流量（支持如 12.3GB / 180GB）
+export CN_TRAFFIC_USAGE="12.3GB / 180GB"
+export INTL_TRAFFIC_USAGE="85.0GB / 180GB"
+
+# 可选：开机流量阈值（默认 180）
+export TRAFFIC_LIMIT_GB="180"
+
 python scripts/ecs_switch.py
 ```
+
+## Telegram 报告优化
+
+脚本会在通知中展示：
+
+- 使用 emoji 的实例状态（🟢运行 / 🔴停止）
+- 国内站与国际站各自流量
+- 流量阈值与流量保护触发状态（🚫）
