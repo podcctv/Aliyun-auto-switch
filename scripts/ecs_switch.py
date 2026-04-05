@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,42 +28,90 @@ class RuntimeConfig:
     intl: InstanceConfig
 
 
+def pick_value(cli_value: str | None, *env_keys: str) -> str:
+    if cli_value:
+        return cli_value
+    for key in env_keys:
+        value = os.getenv(key)
+        if value:
+            return value
+    return ""
+
+
+def ensure_required(value: str, field_name: str, env_names: list[str]) -> str:
+    if value:
+        return value
+    env_hint = " / ".join(env_names)
+    raise ValueError(
+        f"缺少必填参数: {field_name}。请通过命令行参数或环境变量设置（{env_hint}）。"
+        "\n如果在 GitHub Actions 使用 Environment secrets，请确认 job 已绑定对应 environment，"
+        "否则 secrets 会是空字符串。"
+    )
+
+
 def parse_args() -> RuntimeConfig:
     parser = argparse.ArgumentParser(description="Aliyun ECS 按小时交替开关机")
 
-    parser.add_argument("--tg-bot-token", required=True)
-    parser.add_argument("--tg-chat-id", required=True)
+    parser.add_argument("--tg-bot-token")
+    parser.add_argument("--tg-chat-id")
 
-    parser.add_argument("--cn-access-key-id", required=True)
-    parser.add_argument("--cn-access-key-secret", required=True)
-    parser.add_argument("--cn-instance-id", required=True)
-    parser.add_argument("--cn-region-id", required=True)
+    parser.add_argument("--cn-access-key-id")
+    parser.add_argument("--cn-access-key-secret")
+    parser.add_argument("--cn-instance-id")
+    parser.add_argument("--cn-region-id")
 
-    parser.add_argument("--intl-access-key-id", required=True)
-    parser.add_argument("--intl-access-key-secret", required=True)
-    parser.add_argument("--intl-instance-id", required=True)
-    parser.add_argument("--intl-region-id", required=True)
+    parser.add_argument("--intl-access-key-id")
+    parser.add_argument("--intl-access-key-secret")
+    parser.add_argument("--intl-instance-id")
+    parser.add_argument("--intl-region-id")
 
     args = parser.parse_args()
 
+    tg_bot_token = ensure_required(pick_value(args.tg_bot_token, "TG_BOT_TOKEN"), "--tg-bot-token", ["TG_BOT_TOKEN"])
+    tg_chat_id = ensure_required(pick_value(args.tg_chat_id, "TG_CHAT_ID"), "--tg-chat-id", ["TG_CHAT_ID"])
+
     cn = InstanceConfig(
         name="国内站",
-        access_key_id=args.cn_access_key_id,
-        access_key_secret=args.cn_access_key_secret,
-        region_id=args.cn_region_id,
-        instance_id=args.cn_instance_id,
+        access_key_id=ensure_required(
+            pick_value(args.cn_access_key_id, "CN_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            "--cn-access-key-id",
+            ["CN_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"],
+        ),
+        access_key_secret=ensure_required(
+            pick_value(args.cn_access_key_secret, "CN_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+            "--cn-access-key-secret",
+            ["CN_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+        ),
+        region_id=ensure_required(pick_value(args.cn_region_id, "CN_REGION_ID"), "--cn-region-id", ["CN_REGION_ID"]),
+        instance_id=ensure_required(pick_value(args.cn_instance_id, "CN_INSTANCE_ID"), "--cn-instance-id", ["CN_INSTANCE_ID"]),
     )
     intl = InstanceConfig(
         name="国际站",
-        access_key_id=args.intl_access_key_id,
-        access_key_secret=args.intl_access_key_secret,
-        region_id=args.intl_region_id,
-        instance_id=args.intl_instance_id,
+        access_key_id=ensure_required(
+            pick_value(args.intl_access_key_id, "INTL_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            "--intl-access-key-id",
+            ["INTL_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"],
+        ),
+        access_key_secret=ensure_required(
+            pick_value(args.intl_access_key_secret, "INTL_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+            "--intl-access-key-secret",
+            ["INTL_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+        ),
+        region_id=ensure_required(
+            pick_value(args.intl_region_id, "INTL_REGION_ID"),
+            "--intl-region-id",
+            ["INTL_REGION_ID"],
+        ),
+        instance_id=ensure_required(
+            pick_value(args.intl_instance_id, "INTL_INSTANCE_ID"),
+            "--intl-instance-id",
+            ["INTL_INSTANCE_ID"],
+        ),
     )
 
     return RuntimeConfig(
-        tg_bot_token=args.tg_bot_token,
-        tg_chat_id=args.tg_chat_id,
+        tg_bot_token=tg_bot_token,
+        tg_chat_id=tg_chat_id,
         cn=cn,
         intl=intl,
     )

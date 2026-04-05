@@ -25,40 +25,64 @@ GitHub Actions 每小时触发一次（也可手动触发）：
 
 ---
 
-## 公开仓库安全配置（重点）
+## Secrets 配置（非常重要）
 
-你提到仓库是公开的，因此：
+路径：`Settings -> Secrets and variables -> Actions`
 
-- **不要**把 AccessKey / Telegram Token 写进代码文件。
-- **不要**写在 workflow 的 `env` 块里。
-- 使用 GitHub `Secrets`，并在 `run` 命令参数中引用 `${{ secrets.XXX }}`。
+### 1) 推荐：Repository secrets（最简单）
 
-本项目已经按这种方式实现，敏感信息只在 Actions 运行时注入。
+把下面 10 个 key 都配置在 **Repository secrets** 下：
 
----
-
-## 需要配置的 GitHub Secrets
-
-路径：`Settings -> Secrets and variables -> Actions -> Secrets`
-
-### Telegram
+#### Telegram
 
 - `TG_BOT_TOKEN`
 - `TG_CHAT_ID`
 
-### 国内站 ECS
+#### 国内站 ECS
 
 - `CN_ACCESS_KEY_ID`
 - `CN_ACCESS_KEY_SECRET`
 - `CN_INSTANCE_ID`
-- `CN_REGION_ID`（例如 `cn-hongkong`）
+- `CN_REGION_ID`
 
-### 国际站 ECS
+#### 国际站 ECS
 
 - `INTL_ACCESS_KEY_ID`
 - `INTL_ACCESS_KEY_SECRET`
 - `INTL_INSTANCE_ID`
-- `INTL_REGION_ID`（例如 `cn-hongkong`）
+- `INTL_REGION_ID`
+
+### 2) 你截图中的方式：Environment secrets
+
+你当前是把 key 配在 **Environment secrets** 里（而且分在多个 environment）。
+这会导致本工作流拿不到部分 secret，传给脚本就是空字符串，最终报：
+`InvalidCredentials`。
+
+> 原因：GitHub Actions 的一个 job 一次只能绑定 **一个** environment。
+
+如果你坚持使用 Environment secrets，请把以上 10 个 key 放到**同一个** environment，再让 job 绑定这个 environment；否则会缺参。
+
+---
+
+## 常见报错：`InvalidCredentials`
+
+如果报错类似：
+
+- `Error: InvalidCredentials`
+- `Please set up ... ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET`
+
+优先检查：
+
+1. 对应 secret 是否为空（尤其是配置在 Environment secrets 但 job 未绑定该 environment 的情况）。
+2. `CN_*` / `INTL_*` 命名是否和 workflow 完全一致。
+3. AccessKey 是否有 ECS 的操作权限。
+
+脚本现在支持两种传参来源（任选其一）：
+
+- 命令行参数（`--cn-access-key-id` 等）
+- 环境变量（`CN_*` / `INTL_*` / `TG_*`）
+
+并且会在缺参时直接报出明确提示。
 
 ---
 
@@ -80,4 +104,23 @@ python scripts/ecs_switch.py \
   --intl-access-key-secret "xxx" \
   --intl-instance-id "i-xxxx" \
   --intl-region-id "cn-hongkong"
+```
+
+## 本地运行（环境变量方式）
+
+```bash
+export TG_BOT_TOKEN="xxx"
+export TG_CHAT_ID="xxx"
+
+export CN_ACCESS_KEY_ID="xxx"
+export CN_ACCESS_KEY_SECRET="xxx"
+export CN_INSTANCE_ID="i-xxxx"
+export CN_REGION_ID="cn-hongkong"
+
+export INTL_ACCESS_KEY_ID="xxx"
+export INTL_ACCESS_KEY_SECRET="xxx"
+export INTL_INSTANCE_ID="i-xxxx"
+export INTL_REGION_ID="cn-hongkong"
+
+python scripts/ecs_switch.py
 ```
