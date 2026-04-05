@@ -356,6 +356,7 @@ def format_report_message(
     )
     cn_traffic_display = display_value(cn_traffic_usage, traffic_card.usage)
     intl_traffic_display = display_value(intl_traffic_usage, traffic_card.usage)
+    progress_display = f"{traffic_card.progress_bar or '未配置'} {traffic_card.progress_percent}".rstrip()
     switch_line = (
         f"{cn_status_emoji} <b>国内站</b>：<code>{escape(desired_off_cfg.instance_id)}</code> (已关机)"
         if desired_off_cfg.name == "国内站"
@@ -398,7 +399,7 @@ def format_report_message(
                 "",
                 "🧾 <b>套餐信息</b>",
                 f"• <b>套餐名称</b>：<code>{escape(display_value(traffic_card.cdt_name))}</code>",
-                f"• <b>使用进度</b>：<code>{escape(f'{traffic_card.progress_bar or '未配置'} {traffic_card.progress_percent}'.rstrip())}</code>",
+                f"• <b>使用进度</b>：<code>{escape(progress_display)}</code>",
                 f"• <b>总已用流量</b>：<code>{escape(display_value(traffic_card.usage))}</code>",
             ]
         )
