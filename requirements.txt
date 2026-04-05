@@ -1,3 +1,4 @@
 alibabacloud-ecs20140526>=3.0.9
 alibabacloud-tea-openapi>=0.3.13
 requests>=2.31.0
+aliyun-python-sdk-core>=2.16.0

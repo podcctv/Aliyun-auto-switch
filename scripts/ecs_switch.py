@@ -13,6 +13,8 @@ from alibabacloud_ecs20140526 import models as ecs_models
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_tea_openapi import models as open_api_models
 from alibabacloud_tea_openapi.exceptions import ClientException
+from aliyunsdkcore.client import AcsClient
+from aliyunsdkcore.request import CommonRequest
 
 
 @dataclass
@@ -324,6 +326,31 @@ def parse_usage_gb(usage_text: str) -> float | None:
     return value * unit_factor.get(unit, 1.0)
 
 
+def format_usage_gb(usage_gb: float, limit_gb: float) -> str:
+    return f"{usage_gb:.2f}GB / {limit_gb:g}GB"
+
+
+def get_total_traffic_gb(cfg: InstanceConfig) -> float | None:
+    """
+    查询账号在 CDT 的互联网总流量（GB）。
+    参考 ListCdtInternetTraffic 接口。
+    """
+    request = CommonRequest()
+    request.set_domain("cdt.aliyuncs.com")
+    request.set_version("2021-08-13")
+    request.set_action_name("ListCdtInternetTraffic")
+    request.set_method("POST")
+
+    client = AcsClient(cfg.access_key_id, cfg.access_key_secret, cfg.region_id)
+    try:
+        response = client.do_action_with_exception(request)
+        response_json = json.loads(response.decode("utf-8"))
+        total_bytes = sum(item.get("Traffic", 0) for item in response_json.get("TrafficDetails", []))
+        return total_bytes / (1024**3)
+    except Exception:
+        return None
+
+
 def format_report_message(
     success: bool,
     now: datetime,
@@ -436,6 +463,24 @@ def main() -> None:
 
     cn_usage_gb = parse_usage_gb(runtime.cn_traffic_usage)
     intl_usage_gb = parse_usage_gb(runtime.intl_traffic_usage)
+
+    auto_cn_usage_gb = get_total_traffic_gb(cn_cfg)
+    auto_intl_usage_gb = get_total_traffic_gb(intl_cfg)
+
+    if auto_cn_usage_gb is not None:
+        cn_usage_gb = auto_cn_usage_gb
+        runtime.cn_traffic_usage = format_usage_gb(auto_cn_usage_gb, runtime.traffic_limit_gb)
+        logs.append(f"国内站流量自动查询成功: {runtime.cn_traffic_usage}")
+    else:
+        logs.append("国内站流量自动查询失败，回退为配置值")
+
+    if auto_intl_usage_gb is not None:
+        intl_usage_gb = auto_intl_usage_gb
+        runtime.intl_traffic_usage = format_usage_gb(auto_intl_usage_gb, runtime.traffic_limit_gb)
+        logs.append(f"国际站流量自动查询成功: {runtime.intl_traffic_usage}")
+    else:
+        logs.append("国际站流量自动查询失败，回退为配置值")
+
     desired_on_usage_gb = intl_usage_gb if even_hour else cn_usage_gb
     desired_on_usage_text = runtime.intl_traffic_usage if even_hour else runtime.cn_traffic_usage
     traffic_guard_triggered = (
