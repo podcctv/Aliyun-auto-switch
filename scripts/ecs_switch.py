@@ -9,6 +9,7 @@ import requests
 from alibabacloud_ecs20140526 import models as ecs_models
 from alibabacloud_ecs20140526.client import Client as EcsClient
 from alibabacloud_tea_openapi import models as open_api_models
+from alibabacloud_tea_openapi.exceptions import ClientException
 
 
 @dataclass
@@ -28,11 +29,22 @@ class RuntimeConfig:
     intl: InstanceConfig
 
 
+def normalize_value(raw: str | None) -> str:
+    if raw is None:
+        return ""
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1].strip()
+    return value
+
+
 def pick_value(cli_value: str | None, *env_keys: str) -> str:
-    if cli_value:
-        return cli_value
+    cli_normalized = normalize_value(cli_value)
+    if cli_normalized:
+        return cli_normalized
+
     for key in env_keys:
-        value = os.getenv(key)
+        value = normalize_value(os.getenv(key))
         if value:
             return value
     return ""
@@ -117,6 +129,22 @@ def parse_args() -> RuntimeConfig:
     )
 
 
+def validate_access_key(cfg: InstanceConfig) -> None:
+    placeholders = {"your_access_key_id", "your_access_key_secret", "replace_me", "changeme"}
+    ak_lower = cfg.access_key_id.lower()
+    sk_lower = cfg.access_key_secret.lower()
+
+    if ak_lower in placeholders or sk_lower in placeholders:
+        raise ValueError(
+            f"{cfg.name} AccessKey 看起来仍是占位符，请检查 secrets 是否已填入真实值。"
+        )
+
+    if len(cfg.access_key_id) < 12 or len(cfg.access_key_secret) < 16:
+        raise ValueError(
+            f"{cfg.name} AccessKey 长度异常，请确认没有多余引号、换行或被截断。"
+        )
+
+
 def create_client(cfg: InstanceConfig) -> EcsClient:
     return EcsClient(
         open_api_models.Config(
@@ -184,6 +212,10 @@ def send_telegram(tg_bot_token: str, tg_chat_id: str, message: str) -> None:
 def main() -> None:
     runtime = parse_args()
     cn_cfg, intl_cfg = runtime.cn, runtime.intl
+
+    validate_access_key(cn_cfg)
+    validate_access_key(intl_cfg)
+
     cn_client = create_client(cn_cfg)
     intl_client = create_client(intl_cfg)
 
@@ -236,6 +268,14 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except ClientException as exc:
+        message = str(exc)
+        if "InvalidCredentials" in message:
+            raise RuntimeError(
+                "ECS 自动轮换失败: AccessKey 无效。请检查 CN_* / INTL_* 的 AK/SK 是否为真实值，"
+                "并确认没有包含额外空格、换行或引号。"
+            ) from exc
+        raise RuntimeError(f"ECS 自动轮换失败: {exc}") from exc
     except Exception as exc:
         # 此处仅打印错误，避免在异常路径重复发送消息导致噪音告警。
         raise RuntimeError(f"ECS 自动轮换失败: {exc}") from exc
