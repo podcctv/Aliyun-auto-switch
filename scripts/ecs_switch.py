@@ -130,7 +130,7 @@ def parse_args() -> RuntimeConfig:
 
 
 def validate_access_key(cfg: InstanceConfig) -> None:
-    placeholders = {"your_access_key_id", "your_access_key_secret", "replace_me", "changeme"}
+    placeholders = {"your_access_key_id", "your_access_key_secret", "replace_me", "changeme", "***", "null", "none"}
     ak_lower = cfg.access_key_id.lower()
     sk_lower = cfg.access_key_secret.lower()
 
@@ -142,6 +142,11 @@ def validate_access_key(cfg: InstanceConfig) -> None:
     if len(cfg.access_key_id) < 12 or len(cfg.access_key_secret) < 16:
         raise ValueError(
             f"{cfg.name} AccessKey 长度异常，请确认没有多余引号、换行或被截断。"
+        )
+
+    if not cfg.access_key_id.startswith("LTAI"):
+        raise ValueError(
+            f"{cfg.name} AccessKeyId 格式异常。当前值应以 LTAI 开头，请确认 secrets 是否填写了 AccessKeyId。"
         )
 
 
