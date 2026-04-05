@@ -23,6 +23,37 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Validate required secrets are present
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          CN_ACCESS_KEY_ID: ${{ secrets.CN_ACCESS_KEY_ID }}
+          CN_ACCESS_KEY_SECRET: ${{ secrets.CN_ACCESS_KEY_SECRET }}
+          CN_INSTANCE_ID: ${{ secrets.CN_INSTANCE_ID }}
+          CN_REGION_ID: ${{ secrets.CN_REGION_ID }}
+          INTL_ACCESS_KEY_ID: ${{ secrets.INTL_ACCESS_KEY_ID }}
+          INTL_ACCESS_KEY_SECRET: ${{ secrets.INTL_ACCESS_KEY_SECRET }}
+          INTL_INSTANCE_ID: ${{ secrets.INTL_INSTANCE_ID }}
+          INTL_REGION_ID: ${{ secrets.INTL_REGION_ID }}
+        run: |
+          missing=0
+          for key in \
+            TG_BOT_TOKEN TG_CHAT_ID \
+            CN_ACCESS_KEY_ID CN_ACCESS_KEY_SECRET CN_INSTANCE_ID CN_REGION_ID \
+            INTL_ACCESS_KEY_ID INTL_ACCESS_KEY_SECRET INTL_INSTANCE_ID INTL_REGION_ID
+          do
+            if [ -z "${!key}" ]; then
+              echo "::error title=Missing secret::$key is empty or unavailable in this run."
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "This usually means the job cannot read environment/repository secrets in this event context."
+            echo "Check job.environment, Environment name, branch restrictions, and whether this run comes from a fork/Dependabot."
+            exit 1
+          fi
+
       - name: Run ECS switch
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
