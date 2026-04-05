@@ -157,7 +157,8 @@ python scripts/ecs_switch.py
 
 ## 如何查询「国内站流量 / 国际站流量」
 
-当前脚本通过以下两个变量接收流量值（用于阈值判断和通知展示）：
+当前脚本会优先使用 AK/SK 通过 CDT API（`ListCdtInternetTraffic`）自动查询每个账号当月流量。
+当 API 查询失败时，才会回退到以下两个变量（用于阈值判断和通知展示）：
 
 - `CN_TRAFFIC_USAGE`（国内站）
 - `INTL_TRAFFIC_USAGE`（国际站）
@@ -172,15 +173,15 @@ python scripts/ecs_switch.py
 
 适合先验证自动切换流程，确认逻辑正确后再做 API 自动化。
 
-### 方式 B：通过 API/CLI 自动读取后写入环境变量
+### 方式 B：脚本自动查询（默认）
 
-可在 GitHub Actions 中增加一个步骤：
+当前 `scripts/ecs_switch.py` 内已内置自动查询逻辑：
 
-1. 调用阿里云计费/流量相关 API 拉取「当月已使用流量」。
-2. 组装为 `xxGB / 180GB` 文本。
-3. 导出到 `CN_TRAFFIC_USAGE` 和 `INTL_TRAFFIC_USAGE`，再运行 `ecs_switch.py`。
+1. 使用国内站 AK/SK 查询国内站账号流量。
+2. 使用国际站 AK/SK 查询国际站账号流量。
+3. 自动写入报告展示格式：`xx.xxGB / 阈值GB`。
 
-> 提示：不同账号/计费产品的可用接口可能不同，建议先用控制台值对照验证 2~3 天，确认 API 字段含义后再全自动。
+如果自动查询失败，会自动回退到 `CN_TRAFFIC_USAGE` / `INTL_TRAFFIC_USAGE`（如有配置）。
 
 ---
 
