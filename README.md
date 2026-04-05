@@ -62,6 +62,9 @@ GitHub Actions 每小时触发一次（也可手动触发）：
 
 如果你坚持使用 Environment secrets，请把以上 10 个 key 放到**同一个** environment，再让 job 绑定这个 environment；否则会缺参。
 
+当前仓库的 workflow 已默认绑定 `env` 这个 environment（见 `.github/workflows/ecs-auto-switch.yml`），
+所以你在截图里使用 `env` 作为 Environment 名称是可行的。
+
 ---
 
 ## 常见报错：`InvalidCredentials`
