@@ -174,13 +174,12 @@ def get_instance_status(client: EcsClient, cfg: InstanceConfig) -> str:
 
 
 def start_instance(client: EcsClient, cfg: InstanceConfig) -> None:
-    req = ecs_models.StartInstanceRequest(region_id=cfg.region_id, instance_id=cfg.instance_id)
+    req = ecs_models.StartInstanceRequest(instance_id=cfg.instance_id)
     client.start_instance(req)
 
 
 def stop_instance(client: EcsClient, cfg: InstanceConfig) -> None:
     req = ecs_models.StopInstanceRequest(
-        region_id=cfg.region_id,
         instance_id=cfg.instance_id,
         force_stop=False,
         stopped_mode="StopCharging",
