@@ -1,0 +1,37 @@
+name: ECS Auto Switch
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ECS switch
+        run: |
+          python scripts/ecs_switch.py \
+            --tg-bot-token '${{ secrets.TG_BOT_TOKEN }}' \
+            --tg-chat-id '${{ secrets.TG_CHAT_ID }}' \
+            --cn-access-key-id '${{ secrets.CN_ACCESS_KEY_ID }}' \
+            --cn-access-key-secret '${{ secrets.CN_ACCESS_KEY_SECRET }}' \
+            --cn-instance-id '${{ secrets.CN_INSTANCE_ID }}' \
+            --cn-region-id '${{ secrets.CN_REGION_ID }}' \
+            --intl-access-key-id '${{ secrets.INTL_ACCESS_KEY_ID }}' \
+            --intl-access-key-secret '${{ secrets.INTL_ACCESS_KEY_SECRET }}' \
+            --intl-instance-id '${{ secrets.INTL_INSTANCE_ID }}' \
+            --intl-region-id '${{ secrets.INTL_REGION_ID }}'
