@@ -23,15 +23,16 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run ECS switch
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          CN_ACCESS_KEY_ID: ${{ secrets.CN_ACCESS_KEY_ID }}
+          CN_ACCESS_KEY_SECRET: ${{ secrets.CN_ACCESS_KEY_SECRET }}
+          CN_INSTANCE_ID: ${{ secrets.CN_INSTANCE_ID }}
+          CN_REGION_ID: ${{ secrets.CN_REGION_ID }}
+          INTL_ACCESS_KEY_ID: ${{ secrets.INTL_ACCESS_KEY_ID }}
+          INTL_ACCESS_KEY_SECRET: ${{ secrets.INTL_ACCESS_KEY_SECRET }}
+          INTL_INSTANCE_ID: ${{ secrets.INTL_INSTANCE_ID }}
+          INTL_REGION_ID: ${{ secrets.INTL_REGION_ID }}
         run: |
-          python scripts/ecs_switch.py \
-            --tg-bot-token '${{ secrets.TG_BOT_TOKEN }}' \
-            --tg-chat-id '${{ secrets.TG_CHAT_ID }}' \
-            --cn-access-key-id '${{ secrets.CN_ACCESS_KEY_ID }}' \
-            --cn-access-key-secret '${{ secrets.CN_ACCESS_KEY_SECRET }}' \
-            --cn-instance-id '${{ secrets.CN_INSTANCE_ID }}' \
-            --cn-region-id '${{ secrets.CN_REGION_ID }}' \
-            --intl-access-key-id '${{ secrets.INTL_ACCESS_KEY_ID }}' \
-            --intl-access-key-secret '${{ secrets.INTL_ACCESS_KEY_SECRET }}' \
-            --intl-instance-id '${{ secrets.INTL_INSTANCE_ID }}' \
-            --intl-region-id '${{ secrets.INTL_REGION_ID }}'
+          python scripts/ecs_switch.py
