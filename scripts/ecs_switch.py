@@ -235,12 +235,7 @@ def get_instance_snapshot(client: EcsClient, cfg: InstanceConfig) -> InstanceSna
         return InstanceSnapshot(instance_name="", public_ip="", expired_time="", security_group_ids=[])
 
     instance = instances[0]
-    public_ips = (
-        instance.public_ip_address.ip_address
-        if instance.public_ip_address and instance.public_ip_address.ip_address
-        else []
-    )
-    public_ip = public_ips[0] if public_ips else ""
+    public_ip = extract_instance_ip(instance)
     security_groups = instance.security_group_ids.security_group_id if instance.security_group_ids else []
     return InstanceSnapshot(
         instance_name=instance.instance_name or "",
@@ -248,6 +243,26 @@ def get_instance_snapshot(client: EcsClient, cfg: InstanceConfig) -> InstanceSna
         expired_time=instance.expired_time or "",
         security_group_ids=security_groups or [],
     )
+
+
+def extract_instance_ip(instance: object) -> str:
+    public_ip_address = getattr(instance, "public_ip_address", None)
+    public_ips = getattr(public_ip_address, "ip_address", None) if public_ip_address else None
+    if public_ips:
+        return public_ips[0]
+
+    eip_address = getattr(instance, "eip_address", None)
+    eip_ip = getattr(eip_address, "ip_address", "") if eip_address else ""
+    if eip_ip:
+        return eip_ip
+
+    network_interfaces = getattr(instance, "network_interfaces", None)
+    interfaces = getattr(network_interfaces, "network_interface", []) if network_interfaces else []
+    for iface in interfaces or []:
+        primary_ip = getattr(iface, "primary_ip_address", "")
+        if primary_ip:
+            return primary_ip
+    return ""
 
 
 def start_instance(client: EcsClient, cfg: InstanceConfig) -> None:
@@ -281,6 +296,23 @@ def wait_for_status(
     raise TimeoutError(
         f"{cfg.name} 超时未达到目标状态 {expected_status}，当前状态: {final_status}"
     )
+
+
+def wait_for_public_ip(
+    client: EcsClient,
+    cfg: InstanceConfig,
+    timeout_seconds: int = 120,
+    interval_seconds: int = 5,
+) -> str:
+    deadline = time.time() + timeout_seconds
+    latest_ip = ""
+    while time.time() < deadline:
+        snapshot = get_instance_snapshot(client, cfg)
+        latest_ip = snapshot.public_ip
+        if latest_ip:
+            return latest_ip
+        time.sleep(interval_seconds)
+    return latest_ip
 
 
 def send_telegram(tg_bot_token: str, tg_chat_id: str, message: str) -> None:
@@ -330,6 +362,14 @@ def format_usage_gb(usage_gb: float, limit_gb: float) -> str:
     return f"{usage_gb:.2f}GB / {limit_gb:g}GB"
 
 
+def build_progress_bar(usage_gb: float | None, limit_gb: float, width: int = 10) -> str:
+    if usage_gb is None or limit_gb <= 0:
+        return "□" * width
+    ratio = max(0.0, min(1.0, usage_gb / limit_gb))
+    filled = min(width, max(0, int(ratio * width)))
+    return "■" * filled + "□" * (width - filled)
+
+
 def get_total_traffic_gb(cfg: InstanceConfig) -> float | None:
     """
     查询账号在 CDT 的互联网总流量（GB）。
@@ -366,76 +406,37 @@ def format_report_message(
     traffic_limit_gb: float,
     traffic_guard_triggered: bool,
 ) -> str:
-    title = "✅ 轮换成功" if success else "❌ 轮换异常"
-    task_id = f"ecs-switch-{now.strftime('%Y%m%d%H%M%S')}"
-    cn_status_emoji = "🟢" if "Running" in final_on or "Running" in final_off else "⚪"
-    intl_status_emoji = "🟢" if "Running" in final_on or "Running" in final_off else "⚪"
-    if desired_on_cfg.name == "国内站":
-        cn_status_emoji = "🟢" if final_on == "Running" else "🔴"
-        intl_status_emoji = "🟢" if final_off == "Running" else "🔴"
-    else:
-        intl_status_emoji = "🟢" if final_on == "Running" else "🔴"
-        cn_status_emoji = "🟢" if final_off == "Running" else "🔴"
-
     active_security_group_status = display_value(
         traffic_card.security_group_status,
         f"已配置 ({', '.join(online_snapshot.security_group_ids)})" if online_snapshot.security_group_ids else "",
     )
-    cn_traffic_display = display_value(cn_traffic_usage, traffic_card.usage)
-    intl_traffic_display = display_value(intl_traffic_usage, traffic_card.usage)
-    progress_display = f"{traffic_card.progress_bar or '未配置'} {traffic_card.progress_percent}".rstrip()
-    switch_line = (
-        f"{cn_status_emoji} <b>国内站</b>：<code>{escape(desired_off_cfg.instance_id)}</code> (已关机)"
-        if desired_off_cfg.name == "国内站"
-        else f"{cn_status_emoji} <b>国内站</b>：<code>{escape(desired_on_cfg.instance_id)}</code> (已开机)"
-    )
-    intl_line = (
-        f"{intl_status_emoji} <b>国际站</b>：<code>{escape(desired_off_cfg.instance_id)}</code> (已关机)"
-        if desired_off_cfg.name == "国际站"
-        else f"{intl_status_emoji} <b>国际站</b>：<code>{escape(desired_on_cfg.instance_id)}</code> (已开机)"
-    )
+    cn_usage_gb = parse_usage_gb(cn_traffic_usage)
+    intl_usage_gb = parse_usage_gb(intl_traffic_usage)
+    cn_line_status = "ON" if ((desired_on_cfg.name == "国内站" and final_on == "Running") or (desired_off_cfg.name == "国内站" and final_off == "Running")) else "OFF"
+    intl_line_status = "ON" if ((desired_on_cfg.name == "国际站" and final_on == "Running") or (desired_off_cfg.name == "国际站" and final_off == "Running")) else "OFF"
+    success_text = "SUCCESS" if success else "FAILED"
+    ip_text = online_snapshot.public_ip or "N/A (UNASSIGNED)"
+    guard_text = " [TRAFFIC_GUARD]" if traffic_guard_triggered else ""
 
-    summary = [
-        "☁️ <b>阿里云 CDT 主机轮换报告</b>",
-        "━━━━━━━━━━━━━━━━━━",
-        f"🚦 <b>当前状态</b>：{title}",
-        f"🕒 <b>执行时间</b>：<code>{escape(now.strftime('%Y-%m-%d %H:%M:%S %Z'))}</code>",
+    plain_lines = [
+        f"[ ☁️ ALIYUN CDT AUTO-SWITCH : {success_text}{guard_text} ]",
+        "=======================================",
+        f"TIME : {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         "",
-        f"🆔 <b>任务编号</b>：<code>{task_id}</code>",
+        "[ NODE STATUS & TRAFFIC ]",
+        f"[-] CN-NODE ({cn_line_status}) : [{build_progress_bar(cn_usage_gb, traffic_limit_gb)}]  {display_value(cn_traffic_usage, default='N/A')}",
+        f"[+] HK-NODE ({intl_line_status})  : [{build_progress_bar(intl_usage_gb, traffic_limit_gb)}]  {display_value(intl_traffic_usage, default='N/A')}",
         "",
-        "🌐 <b>节点变更详情</b>",
-        switch_line,
-        intl_line,
+        "[ ACTIVE INSTANCE INFO ]",
+        f"> I D  : {desired_on_cfg.instance_id}",
+        f"> I P  : {ip_text}",
+        f"> SEC  : {', '.join(online_snapshot.security_group_ids) if online_snapshot.security_group_ids else 'N/A'} [{active_security_group_status}]",
+        "=======================================",
         "",
-        "🖥️ <b>当前在线实例</b>",
-        f"• <b>实例名称</b>：<code>{escape(online_snapshot.instance_name or desired_on_cfg.name)}</code>",
-        f"• <b>公网 IP</b>：<code>{escape(online_snapshot.public_ip or '未获取')}</code>",
-        f"• <b>实例地区</b>：<code>{escape(display_value(traffic_card.region_name, desired_on_cfg.region_id))}</code>",
-        f"• <b>实例ID</b>：<code>{escape(desired_on_cfg.instance_id)}</code>",
-        f"• <b>到期时间</b>：<code>{escape(display_value(traffic_card.expires_at, online_snapshot.expired_time))}</code>",
-        f"• <b>安全组状态</b>：<code>{escape(active_security_group_status)}</code>",
-        "",
-        "📊 <b>CDT 流量状态</b>",
-        f"🔹 <b>国内站本月已用</b>：<code>{escape(cn_traffic_display)}</code>",
-        f"🔹 <b>国际站本月已用</b>：<code>{escape(intl_traffic_display)}</code>",
-        f"🔸 <b>流量阈值</b>：<code>{traffic_limit_gb:g}GB</code>",
+        "[ EXECUTION LOG ]",
     ]
-    if traffic_card.cdt_name or traffic_card.progress_bar or traffic_card.usage:
-        summary.extend(
-            [
-                "",
-                "🧾 <b>套餐信息</b>",
-                f"• <b>套餐名称</b>：<code>{escape(display_value(traffic_card.cdt_name))}</code>",
-                f"• <b>使用进度</b>：<code>{escape(progress_display)}</code>",
-                f"• <b>总已用流量</b>：<code>{escape(display_value(traffic_card.usage))}</code>",
-            ]
-        )
-    if traffic_guard_triggered:
-        summary.append("• 🚫 <b>流量保护已触发</b>：达到阈值的实例保持关机，待流量低于阈值后再自动开机")
-
-    summary.extend(["", "📝 <b>执行明细</b>"])
-    summary.extend([f"• <code>{escape(line)}</code>" for line in action_logs])
-    return "\n".join(summary)
+    plain_lines.extend([f"- {line}" for line in action_logs])
+    return f"<pre>{escape(chr(10).join(plain_lines))}</pre>"
 
 
 def main() -> None:
@@ -528,6 +529,12 @@ def main() -> None:
     expected_on_status = "Stopped" if traffic_guard_triggered else "Running"
     success = final_on == expected_on_status and final_off == "Stopped"
     online_snapshot = get_instance_snapshot(desired_on_client, desired_on_cfg)
+    if not online_snapshot.public_ip and final_on == "Running":
+        online_snapshot.public_ip = wait_for_public_ip(desired_on_client, desired_on_cfg)
+        if online_snapshot.public_ip:
+            logs.append(f"{desired_on_cfg.name} 公网IP获取成功: {online_snapshot.public_ip}")
+        else:
+            logs.append(f"{desired_on_cfg.name} 公网IP仍未分配")
     message = format_report_message(
         success=success,
         now=now,
