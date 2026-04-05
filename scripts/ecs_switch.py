@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,9 @@ class RuntimeConfig:
     cn: InstanceConfig
     intl: InstanceConfig
     traffic_card: "TrafficCardConfig"
+    cn_traffic_usage: str
+    intl_traffic_usage: str
+    traffic_limit_gb: float
 
 
 @dataclass
@@ -104,6 +108,9 @@ def parse_args() -> RuntimeConfig:
     parser.add_argument("--cdt-region-name")
     parser.add_argument("--cdt-expires-at")
     parser.add_argument("--cdt-security-group-status")
+    parser.add_argument("--cn-traffic-usage")
+    parser.add_argument("--intl-traffic-usage")
+    parser.add_argument("--traffic-limit-gb")
 
     args = parser.parse_args()
 
@@ -163,6 +170,9 @@ def parse_args() -> RuntimeConfig:
             expires_at=pick_value(args.cdt_expires_at, "ALIYUN_CDT_EXPIRES_AT"),
             security_group_status=pick_value(args.cdt_security_group_status, "ALIYUN_CDT_SECURITY_GROUP_STATUS"),
         ),
+        cn_traffic_usage=pick_value(args.cn_traffic_usage, "CN_TRAFFIC_USAGE"),
+        intl_traffic_usage=pick_value(args.intl_traffic_usage, "INTL_TRAFFIC_USAGE"),
+        traffic_limit_gb=float(pick_value(args.traffic_limit_gb, "TRAFFIC_LIMIT_GB") or "180"),
     )
 
 
@@ -274,6 +284,34 @@ def send_telegram(tg_bot_token: str, tg_chat_id: str, message: str) -> None:
     resp.raise_for_status()
 
 
+def parse_usage_gb(usage_text: str) -> float | None:
+    """
+    从流量字符串提取已使用流量（GB）。
+    示例:
+    - "12.3GB / 180GB" -> 12.3
+    - "180 G" -> 180.0
+    - "102400MB / 180GB" -> 100.0
+    """
+    text = (usage_text or "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)?", text, re.IGNORECASE)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    unit = (match.group(2) or "GB").upper()
+    unit_factor = {
+        "TB": 1024.0,
+        "GB": 1.0,
+        "MB": 1.0 / 1024.0,
+        "KB": 1.0 / (1024.0 * 1024.0),
+        "B": 1.0 / (1024.0 * 1024.0 * 1024.0),
+    }
+    return value * unit_factor.get(unit, 1.0)
+
+
 def format_report_message(
     success: bool,
     now: datetime,
@@ -284,8 +322,21 @@ def format_report_message(
     action_logs: list[str],
     traffic_card: TrafficCardConfig,
     online_snapshot: InstanceSnapshot,
+    cn_traffic_usage: str,
+    intl_traffic_usage: str,
+    traffic_limit_gb: float,
+    traffic_guard_triggered: bool,
 ) -> str:
     title = "✅ ECS 自动轮换执行成功" if success else "❌ ECS 自动轮换执行异常"
+    cn_status_emoji = "🟢" if "Running" in final_on or "Running" in final_off else "⚪"
+    intl_status_emoji = "🟢" if "Running" in final_on or "Running" in final_off else "⚪"
+    if desired_on_cfg.name == "国内站":
+        cn_status_emoji = "🟢" if final_on == "Running" else "🔴"
+        intl_status_emoji = "🟢" if final_off == "Running" else "🔴"
+    else:
+        intl_status_emoji = "🟢" if final_on == "Running" else "🔴"
+        cn_status_emoji = "🟢" if final_off == "Running" else "🔴"
+
     summary = [
         title,
         "",
@@ -293,6 +344,7 @@ def format_report_message(
         f"• 执行时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"• 调度策略：{desired_on_cfg.name} 开机，{desired_off_cfg.name} 关机",
         f"• 最终状态：{desired_on_cfg.name}={final_on}，{desired_off_cfg.name}={final_off}",
+        f"• 运行状态：{cn_status_emoji} 国内站 / {intl_status_emoji} 国际站",
         "",
         "【当前在线实例】",
         f"• 实例名称：{online_snapshot.instance_name or desired_on_cfg.name}",
@@ -313,6 +365,15 @@ def format_report_message(
                 f"• 已使用流量：{traffic_card.usage or '未配置'}",
             ]
         )
+    summary.extend(
+        [
+            f"• 国内站流量：{cn_traffic_usage or '未配置'}",
+            f"• 国际站流量：{intl_traffic_usage or '未配置'}",
+            f"• 流量阈值：{traffic_limit_gb:g}GB",
+        ]
+    )
+    if traffic_guard_triggered:
+        summary.append("• 🚫 流量保护已触发：达到阈值的实例保持关机，待流量低于阈值后再自动开机")
 
     summary.extend(["", "【执行明细】"])
     summary.extend([f"• {line}" for line in action_logs])
@@ -340,16 +401,39 @@ def main() -> None:
     logs: list[str] = []
     logs.append(f"当前小时={now.hour}")
     logs.append(f"计划: {desired_on_cfg.name} 开机, {desired_off_cfg.name} 关机")
+    logs.append(f"流量阈值: {runtime.traffic_limit_gb:g}GB")
+
+    cn_usage_gb = parse_usage_gb(runtime.cn_traffic_usage)
+    intl_usage_gb = parse_usage_gb(runtime.intl_traffic_usage)
+    desired_on_usage_gb = intl_usage_gb if even_hour else cn_usage_gb
+    desired_on_usage_text = runtime.intl_traffic_usage if even_hour else runtime.cn_traffic_usage
+    traffic_guard_triggered = (
+        desired_on_usage_gb is not None and desired_on_usage_gb >= runtime.traffic_limit_gb
+    )
+    logs.append(f"国内站流量: {runtime.cn_traffic_usage or '未配置'}")
+    logs.append(f"国际站流量: {runtime.intl_traffic_usage or '未配置'}")
 
     on_status = get_instance_status(desired_on_client, desired_on_cfg)
     logs.append(f"{desired_on_cfg.name} 当前状态: {on_status}")
-    if on_status != "Running":
-        logs.append(f"执行开机: {desired_on_cfg.name}")
-        start_instance(desired_on_client, desired_on_cfg)
-        wait_for_status(desired_on_client, desired_on_cfg, "Running")
-        logs.append(f"{desired_on_cfg.name} 已确认开机")
+    if traffic_guard_triggered:
+        logs.append(
+            f"{desired_on_cfg.name} 流量达到阈值（{desired_on_usage_text or f'{desired_on_usage_gb:.2f}GB'}），暂停开机"
+        )
+        if on_status == "Running":
+            logs.append(f"执行关机(流量保护): {desired_on_cfg.name}")
+            stop_instance(desired_on_client, desired_on_cfg)
+            wait_for_status(desired_on_client, desired_on_cfg, "Stopped")
+            logs.append(f"{desired_on_cfg.name} 已确认关机")
+        else:
+            logs.append(f"{desired_on_cfg.name} 已是关机状态，无需开机")
     else:
-        logs.append(f"{desired_on_cfg.name} 已是开机状态")
+        if on_status != "Running":
+            logs.append(f"执行开机: {desired_on_cfg.name}")
+            start_instance(desired_on_client, desired_on_cfg)
+            wait_for_status(desired_on_client, desired_on_cfg, "Running")
+            logs.append(f"{desired_on_cfg.name} 已确认开机")
+        else:
+            logs.append(f"{desired_on_cfg.name} 已是开机状态")
 
     off_status = get_instance_status(desired_off_client, desired_off_cfg)
     logs.append(f"{desired_off_cfg.name} 当前状态: {off_status}")
@@ -365,7 +449,8 @@ def main() -> None:
     final_off = get_instance_status(desired_off_client, desired_off_cfg)
     logs.append(f"最终状态: {desired_on_cfg.name}={final_on}, {desired_off_cfg.name}={final_off}")
 
-    success = final_on == "Running" and final_off == "Stopped"
+    expected_on_status = "Stopped" if traffic_guard_triggered else "Running"
+    success = final_on == expected_on_status and final_off == "Stopped"
     online_snapshot = get_instance_snapshot(desired_on_client, desired_on_cfg)
     message = format_report_message(
         success=success,
@@ -377,6 +462,10 @@ def main() -> None:
         action_logs=logs,
         traffic_card=runtime.traffic_card,
         online_snapshot=online_snapshot,
+        cn_traffic_usage=runtime.cn_traffic_usage,
+        intl_traffic_usage=runtime.intl_traffic_usage,
+        traffic_limit_gb=runtime.traffic_limit_gb,
+        traffic_guard_triggered=traffic_guard_triggered,
     )
 
     send_telegram(runtime.tg_bot_token, runtime.tg_chat_id, message)
