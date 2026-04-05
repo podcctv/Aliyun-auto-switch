@@ -57,6 +57,13 @@ class InstanceSnapshot:
     security_group_ids: list[str]
 
 
+@dataclass
+class SecurityGroupRuleStatus:
+    security_group_id: str
+    ready: bool
+    detail: str = ""
+
+
 def normalize_value(raw: str | None) -> str:
     if raw is None:
         return ""
@@ -279,6 +286,55 @@ def stop_instance(client: EcsClient, cfg: InstanceConfig) -> None:
     client.stop_instance(req)
 
 
+def ensure_security_group_access(cfg: InstanceConfig, security_group_id: str) -> SecurityGroupRuleStatus:
+    """
+    确保安全组已放行所有入站访问，避免实例开机后无法连接。
+    """
+    client = AcsClient(cfg.access_key_id, cfg.access_key_secret, cfg.region_id)
+
+    describe_req = CommonRequest()
+    describe_req.set_domain("ecs.aliyuncs.com")
+    describe_req.set_version("2014-05-26")
+    describe_req.set_action_name("DescribeSecurityGroupAttribute")
+    describe_req.set_method("POST")
+    describe_req.add_query_param("RegionId", cfg.region_id)
+    describe_req.add_query_param("SecurityGroupId", security_group_id)
+
+    try:
+        response = client.do_action_with_exception(describe_req)
+        data = json.loads(response.decode("utf-8"))
+        permissions = data.get("Permissions", {}).get("Permission", [])
+        has_open_ingress = any(
+            (item.get("Direction") in (None, "", "ingress"))
+            and item.get("Policy", "").lower() == "accept"
+            and item.get("IpProtocol", "").lower() == "all"
+            and item.get("PortRange", "") == "-1/-1"
+            and item.get("SourceCidrIp", "") == "0.0.0.0/0"
+            for item in permissions
+        )
+        if has_open_ingress:
+            return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=True, detail="READY")
+
+        auth_req = CommonRequest()
+        auth_req.set_domain("ecs.aliyuncs.com")
+        auth_req.set_version("2014-05-26")
+        auth_req.set_action_name("AuthorizeSecurityGroup")
+        auth_req.set_method("POST")
+        auth_req.add_query_param("RegionId", cfg.region_id)
+        auth_req.add_query_param("SecurityGroupId", security_group_id)
+        auth_req.add_query_param("IpProtocol", "all")
+        auth_req.add_query_param("PortRange", "-1/-1")
+        auth_req.add_query_param("SourceCidrIp", "0.0.0.0/0")
+        auth_req.add_query_param("Policy", "accept")
+        auth_req.add_query_param("Priority", "1")
+        auth_req.add_query_param("NicType", "internet")
+
+        client.do_action_with_exception(auth_req)
+        return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=True, detail="READY")
+    except Exception as exc:
+        return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=False, detail=f"ERROR: {exc}")
+
+
 def wait_for_status(
     client: EcsClient,
     cfg: InstanceConfig,
@@ -424,11 +480,8 @@ def format_report_message(
     intl_traffic_usage: str,
     traffic_limit_gb: float,
     traffic_guard_triggered: bool,
+    security_group_status: SecurityGroupRuleStatus | None,
 ) -> str:
-    active_security_group_status = display_value(
-        traffic_card.security_group_status,
-        f"已配置 ({', '.join(online_snapshot.security_group_ids)})" if online_snapshot.security_group_ids else "",
-    )
     cn_usage_gb = parse_usage_gb(cn_traffic_usage)
     intl_usage_gb = parse_usage_gb(intl_traffic_usage)
     cn_line_status = "ON" if ((desired_on_cfg.name == "国内站" and final_on == "Running") or (desired_off_cfg.name == "国内站" and final_off == "Running")) else "OFF"
@@ -436,14 +489,12 @@ def format_report_message(
     success_text = "SUCCESS" if success else "FAILED"
     ip_text = online_snapshot.public_ip or "N/A (UNASSIGNED)"
     guard_text = " [TRAFFIC_GUARD]" if traffic_guard_triggered else ""
-    masked_instance_id = mask_middle(desired_on_cfg.instance_id, keep_start=4, keep_end=4)
-    masked_ip_text = mask_ip(ip_text)
-    security_groups = ", ".join(online_snapshot.security_group_ids) if online_snapshot.security_group_ids else "N/A"
-    masked_security_groups = (
-        ", ".join(mask_middle(sec, keep_start=3, keep_end=3) for sec in online_snapshot.security_group_ids)
-        if online_snapshot.security_group_ids
-        else "N/A"
-    )
+    if security_group_status:
+        sec_id = security_group_status.security_group_id
+        sec_state = "READY" if security_group_status.ready else "ERROR"
+    else:
+        sec_id = online_snapshot.security_group_ids[0] if online_snapshot.security_group_ids else "N/A"
+        sec_state = display_value(traffic_card.security_group_status, default="UNKNOWN")
 
     plain_lines = [
         f"[ ☁️ ALIYUN CDT AUTO-SWITCH : {success_text}{guard_text} ]",
@@ -457,12 +508,7 @@ def format_report_message(
         f"[ 🖥️ ACTIVE INSTANCE : {'CN-NODE' if desired_on_cfg.name == '国内站' else 'HK-NODE'} ]",
         f"> I D : {desired_on_cfg.instance_id}",
         f"> I P : {ip_text}",
-        f"> SEC : {security_groups} [{active_security_group_status}]",
-        "",
-        "[ 📋 COPY SAFE (MASKED) ]",
-        f"> I D : {masked_instance_id}",
-        f"> I P : {masked_ip_text}",
-        f"> SED : {masked_security_groups}",
+        f"> SEC : {sec_id} [{sec_state}]",
         "=======================================",
         "",
         "[ 📝 EXECUTION FLOW ]",
@@ -489,10 +535,9 @@ def main() -> None:
     desired_off_cfg = cn_cfg if even_hour else intl_cfg
     desired_off_client = cn_client if even_hour else intl_client
 
-    logs: list[str] = []
-    logs.append(f"当前小时={now.hour}")
-    logs.append(f"计划: {desired_on_cfg.name} 开机, {desired_off_cfg.name} 关机")
-    logs.append(f"流量阈值: {runtime.traffic_limit_gb:g}GB")
+    logs: list[str] = [
+        f"🔍 策略 : 设阈 {runtime.traffic_limit_gb:g}G | 计划: {'HK' if desired_on_cfg.name == '国际站' else 'CN'}开机, {'CN' if desired_off_cfg.name == '国内站' else 'HK'}关机"
+    ]
 
     cn_usage_gb = parse_usage_gb(runtime.cn_traffic_usage)
     intl_usage_gb = parse_usage_gb(runtime.intl_traffic_usage)
@@ -503,60 +548,57 @@ def main() -> None:
     if auto_cn_usage_gb is not None:
         cn_usage_gb = auto_cn_usage_gb
         runtime.cn_traffic_usage = format_usage_gb(auto_cn_usage_gb, runtime.traffic_limit_gb)
-        logs.append(f"国内站流量自动查询成功: {runtime.cn_traffic_usage}")
-    else:
-        logs.append("国内站流量自动查询失败，回退为配置值")
 
     if auto_intl_usage_gb is not None:
         intl_usage_gb = auto_intl_usage_gb
         runtime.intl_traffic_usage = format_usage_gb(auto_intl_usage_gb, runtime.traffic_limit_gb)
-        logs.append(f"国际站流量自动查询成功: {runtime.intl_traffic_usage}")
-    else:
-        logs.append("国际站流量自动查询失败，回退为配置值")
 
     desired_on_usage_gb = intl_usage_gb if even_hour else cn_usage_gb
     desired_on_usage_text = runtime.intl_traffic_usage if even_hour else runtime.cn_traffic_usage
     traffic_guard_triggered = (
         desired_on_usage_gb is not None and desired_on_usage_gb >= runtime.traffic_limit_gb
     )
-    logs.append(f"国内站流量: {runtime.cn_traffic_usage or '未配置'}")
-    logs.append(f"国际站流量: {runtime.intl_traffic_usage or '未配置'}")
-
     on_status = get_instance_status(desired_on_client, desired_on_cfg)
-    logs.append(f"{desired_on_cfg.name} 当前状态: {on_status}")
+    desired_on_node = "HK" if desired_on_cfg.name == "国际站" else "CN"
+    desired_off_node = "CN" if desired_off_cfg.name == "国内站" else "HK"
+    sg_status: SecurityGroupRuleStatus | None = None
     if traffic_guard_triggered:
         logs.append(
-            f"{desired_on_cfg.name} 流量达到阈值（{desired_on_usage_text or f'{desired_on_usage_gb:.2f}GB'}），暂停开机"
+            f"⚡ 动作 : {desired_on_cfg.name} 流量达到阈值（{desired_on_usage_text or f'{desired_on_usage_gb:.2f}GB'}）-> 暂停开机"
         )
         if on_status == "Running":
-            logs.append(f"执行关机(流量保护): {desired_on_cfg.name}")
+            logs.append(f"⚡ 动作 : {desired_on_cfg.name} 运行中 -> 执行关机(流量保护)... [OK]")
             stop_instance(desired_on_client, desired_on_cfg)
             wait_for_status(desired_on_client, desired_on_cfg, "Stopped")
-            logs.append(f"{desired_on_cfg.name} 已确认关机")
         else:
-            logs.append(f"{desired_on_cfg.name} 已是关机状态，无需开机")
+            logs.append(f"⚡ 动作 : {desired_on_cfg.name} 已关机 -> 跳过开机")
     else:
         if on_status != "Running":
-            logs.append(f"执行开机: {desired_on_cfg.name}")
+            logs.append(f"⚡ 动作 : {desired_on_cfg.name} ({desired_on_node}) 未运行 -> 执行开机... [OK]")
             start_instance(desired_on_client, desired_on_cfg)
             wait_for_status(desired_on_client, desired_on_cfg, "Running")
-            logs.append(f"{desired_on_cfg.name} 已确认开机")
         else:
-            logs.append(f"{desired_on_cfg.name} 已是开机状态")
+            logs.append(f"⚡ 动作 : {desired_on_cfg.name} ({desired_on_node}) 已运行 -> 跳过开机")
+
+        on_snapshot = get_instance_snapshot(desired_on_client, desired_on_cfg)
+        if on_snapshot.security_group_ids:
+            sg_status = ensure_security_group_access(desired_on_cfg, on_snapshot.security_group_ids[0])
+            if sg_status.ready:
+                logs.append(f"🛡️ 动作 : 安全组 {sg_status.security_group_id} 已放行访问 [OK]")
+            else:
+                logs.append(f"🛡️ 动作 : 安全组放行失败 [{sg_status.detail}]")
 
     off_status = get_instance_status(desired_off_client, desired_off_cfg)
-    logs.append(f"{desired_off_cfg.name} 当前状态: {off_status}")
     if off_status != "Stopped":
-        logs.append(f"执行关机: {desired_off_cfg.name}")
+        logs.append(f"⚡ 动作 : {desired_off_cfg.name} ({desired_off_node}) 运行中 -> 执行关机... [OK]")
         stop_instance(desired_off_client, desired_off_cfg)
         wait_for_status(desired_off_client, desired_off_cfg, "Stopped")
-        logs.append(f"{desired_off_cfg.name} 已确认关机")
     else:
-        logs.append(f"{desired_off_cfg.name} 已是关机状态")
+        logs.append(f"⚡ 动作 : {desired_off_cfg.name} ({desired_off_node}) 已关机 -> 跳过关机")
 
     final_on = get_instance_status(desired_on_client, desired_on_cfg)
     final_off = get_instance_status(desired_off_client, desired_off_cfg)
-    logs.append(f"最终状态: {desired_on_cfg.name}={final_on}, {desired_off_cfg.name}={final_off}")
+    logs.append(f"✅ 结果 : {desired_on_node}={final_on} | {desired_off_node}={final_off}")
 
     expected_on_status = "Stopped" if traffic_guard_triggered else "Running"
     success = final_on == expected_on_status and final_off == "Stopped"
@@ -581,6 +623,7 @@ def main() -> None:
         intl_traffic_usage=runtime.intl_traffic_usage,
         traffic_limit_gb=runtime.traffic_limit_gb,
         traffic_guard_triggered=traffic_guard_triggered,
+        security_group_status=sg_status,
     )
 
     send_telegram(runtime.tg_bot_token, runtime.tg_chat_id, message)
