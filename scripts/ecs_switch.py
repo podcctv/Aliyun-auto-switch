@@ -283,7 +283,15 @@ def stop_instance(client: EcsClient, cfg: InstanceConfig) -> None:
         force_stop=False,
         stopped_mode="StopCharging",
     )
-    client.stop_instance(req)
+    try:
+        client.stop_instance(req)
+    except ClientException as exc:
+        # 幂等处理：实例已处于 Stopping 时，重复关机会返回 IncorrectInstanceStatus。
+        # 此时视为“关机流程已触发”，交给后续轮询等待最终进入 Stopped。
+        message = str(exc)
+        if "IncorrectInstanceStatus" in message and "Stopping" in message:
+            return
+        raise
 
 
 def ensure_security_group_access(cfg: InstanceConfig, security_group_id: str) -> SecurityGroupRuleStatus:
