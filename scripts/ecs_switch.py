@@ -370,6 +370,25 @@ def build_progress_bar(usage_gb: float | None, limit_gb: float, width: int = 10)
     return "■" * filled + "□" * (width - filled)
 
 
+def mask_middle(value: str, keep_start: int = 3, keep_end: int = 2, mask_char: str = "*") -> str:
+    text = (value or "").strip()
+    if not text:
+        return "N/A"
+    if len(text) <= keep_start + keep_end:
+        return mask_char * len(text)
+    return f"{text[:keep_start]}{mask_char * (len(text) - keep_start - keep_end)}{text[-keep_end:]}"
+
+
+def mask_ip(ip: str) -> str:
+    text = (ip or "").strip()
+    if not text:
+        return "N/A (UNASSIGNED)"
+    parts = text.split(".")
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.*.*"
+    return mask_middle(text, keep_start=2, keep_end=2)
+
+
 def get_total_traffic_gb(cfg: InstanceConfig) -> float | None:
     """
     查询账号在 CDT 的互联网总流量（GB）。
@@ -417,25 +436,38 @@ def format_report_message(
     success_text = "SUCCESS" if success else "FAILED"
     ip_text = online_snapshot.public_ip or "N/A (UNASSIGNED)"
     guard_text = " [TRAFFIC_GUARD]" if traffic_guard_triggered else ""
+    masked_instance_id = mask_middle(desired_on_cfg.instance_id, keep_start=4, keep_end=4)
+    masked_ip_text = mask_ip(ip_text)
+    security_groups = ", ".join(online_snapshot.security_group_ids) if online_snapshot.security_group_ids else "N/A"
+    masked_security_groups = (
+        ", ".join(mask_middle(sec, keep_start=3, keep_end=3) for sec in online_snapshot.security_group_ids)
+        if online_snapshot.security_group_ids
+        else "N/A"
+    )
 
     plain_lines = [
         f"[ ☁️ ALIYUN CDT AUTO-SWITCH : {success_text}{guard_text} ]",
         "=======================================",
         f"TIME : {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         "",
-        "[ NODE STATUS & TRAFFIC ]",
-        f"[-] CN-NODE ({cn_line_status}) : [{build_progress_bar(cn_usage_gb, traffic_limit_gb)}]  {display_value(cn_traffic_usage, default='N/A')}",
-        f"[+] HK-NODE ({intl_line_status})  : [{build_progress_bar(intl_usage_gb, traffic_limit_gb)}]  {display_value(intl_traffic_usage, default='N/A')}",
+        "[ 📊 TRAFFIC & STATUS ]",
+        f"[-] CN-NODE ({cn_line_status}) : [{build_progress_bar(cn_usage_gb, traffic_limit_gb)}] {display_value(cn_traffic_usage, default='N/A')}",
+        f"[+] HK-NODE ({intl_line_status}) : [{build_progress_bar(intl_usage_gb, traffic_limit_gb)}] {display_value(intl_traffic_usage, default='N/A')}",
         "",
-        "[ ACTIVE INSTANCE INFO ]",
-        f"> I D  : {desired_on_cfg.instance_id}",
-        f"> I P  : {ip_text}",
-        f"> SEC  : {', '.join(online_snapshot.security_group_ids) if online_snapshot.security_group_ids else 'N/A'} [{active_security_group_status}]",
+        f"[ 🖥️ ACTIVE INSTANCE : {'CN-NODE' if desired_on_cfg.name == '国内站' else 'HK-NODE'} ]",
+        f"> I D : {desired_on_cfg.instance_id}",
+        f"> I P : {ip_text}",
+        f"> SEC : {security_groups} [{active_security_group_status}]",
+        "",
+        "[ 📋 COPY SAFE (MASKED) ]",
+        f"> I D : {masked_instance_id}",
+        f"> I P : {masked_ip_text}",
+        f"> SED : {masked_security_groups}",
         "=======================================",
         "",
-        "[ EXECUTION LOG ]",
+        "[ 📝 EXECUTION FLOW ]",
     ]
-    plain_lines.extend([f"- {line}" for line in action_logs])
+    plain_lines.extend([f"{idx}. {line}" for idx, line in enumerate(action_logs, start=1)])
     return f"<pre>{escape(chr(10).join(plain_lines))}</pre>"
 
 
