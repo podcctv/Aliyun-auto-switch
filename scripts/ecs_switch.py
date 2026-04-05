@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -27,6 +28,25 @@ class RuntimeConfig:
     tg_chat_id: str
     cn: InstanceConfig
     intl: InstanceConfig
+    traffic_card: "TrafficCardConfig"
+
+
+@dataclass
+class TrafficCardConfig:
+    cdt_name: str
+    progress_bar: str
+    progress_percent: str
+    usage: str
+    region_name: str
+    expires_at: str
+    security_group_status: str
+
+
+@dataclass
+class InstanceSnapshot:
+    instance_name: str
+    public_ip: str
+    expired_time: str
 
 
 def normalize_value(raw: str | None) -> str:
@@ -77,6 +97,14 @@ def parse_args() -> RuntimeConfig:
     parser.add_argument("--intl-instance-id")
     parser.add_argument("--intl-region-id")
 
+    parser.add_argument("--cdt-name")
+    parser.add_argument("--cdt-progress-bar")
+    parser.add_argument("--cdt-progress-percent")
+    parser.add_argument("--cdt-usage")
+    parser.add_argument("--cdt-region-name")
+    parser.add_argument("--cdt-expires-at")
+    parser.add_argument("--cdt-security-group-status")
+
     args = parser.parse_args()
 
     tg_bot_token = ensure_required(pick_value(args.tg_bot_token, "TG_BOT_TOKEN"), "--tg-bot-token", ["TG_BOT_TOKEN"])
@@ -126,6 +154,15 @@ def parse_args() -> RuntimeConfig:
         tg_chat_id=tg_chat_id,
         cn=cn,
         intl=intl,
+        traffic_card=TrafficCardConfig(
+            cdt_name=pick_value(args.cdt_name, "ALIYUN_CDT_NAME"),
+            progress_bar=pick_value(args.cdt_progress_bar, "ALIYUN_CDT_PROGRESS_BAR"),
+            progress_percent=pick_value(args.cdt_progress_percent, "ALIYUN_CDT_PROGRESS_PERCENT"),
+            usage=pick_value(args.cdt_usage, "ALIYUN_CDT_USAGE"),
+            region_name=pick_value(args.cdt_region_name, "ALIYUN_CDT_REGION_NAME"),
+            expires_at=pick_value(args.cdt_expires_at, "ALIYUN_CDT_EXPIRES_AT"),
+            security_group_status=pick_value(args.cdt_security_group_status, "ALIYUN_CDT_SECURITY_GROUP_STATUS"),
+        ),
     )
 
 
@@ -173,6 +210,30 @@ def get_instance_status(client: EcsClient, cfg: InstanceConfig) -> str:
     return statuses[0].status
 
 
+def get_instance_snapshot(client: EcsClient, cfg: InstanceConfig) -> InstanceSnapshot:
+    req = ecs_models.DescribeInstancesRequest(
+        region_id=cfg.region_id,
+        instance_ids=json.dumps([cfg.instance_id]),
+    )
+    resp = client.describe_instances(req)
+    instances = resp.body.instances.instance
+    if not instances:
+        return InstanceSnapshot(instance_name="", public_ip="", expired_time="")
+
+    instance = instances[0]
+    public_ips = (
+        instance.public_ip_address.ip_address
+        if instance.public_ip_address and instance.public_ip_address.ip_address
+        else []
+    )
+    public_ip = public_ips[0] if public_ips else ""
+    return InstanceSnapshot(
+        instance_name=instance.instance_name or "",
+        public_ip=public_ip,
+        expired_time=instance.expired_time or "",
+    )
+
+
 def start_instance(client: EcsClient, cfg: InstanceConfig) -> None:
     req = ecs_models.StartInstanceRequest(instance_id=cfg.instance_id)
     client.start_instance(req)
@@ -213,6 +274,51 @@ def send_telegram(tg_bot_token: str, tg_chat_id: str, message: str) -> None:
     resp.raise_for_status()
 
 
+def format_report_message(
+    success: bool,
+    now: datetime,
+    desired_on_cfg: InstanceConfig,
+    desired_off_cfg: InstanceConfig,
+    final_on: str,
+    final_off: str,
+    action_logs: list[str],
+    traffic_card: TrafficCardConfig,
+    online_snapshot: InstanceSnapshot,
+) -> str:
+    title = "✅ ECS 自动轮换执行成功" if success else "❌ ECS 自动轮换执行异常"
+    summary = [
+        title,
+        "",
+        "【执行摘要】",
+        f"• 执行时间：{now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+        f"• 调度策略：{desired_on_cfg.name} 开机，{desired_off_cfg.name} 关机",
+        f"• 最终状态：{desired_on_cfg.name}={final_on}，{desired_off_cfg.name}={final_off}",
+        "",
+        "【当前在线实例】",
+        f"• 实例名称：{online_snapshot.instance_name or desired_on_cfg.name}",
+        f"• 公网 IP：{online_snapshot.public_ip or '未获取'}",
+        f"• 实例地区：{traffic_card.region_name or desired_on_cfg.region_id}",
+        f"• 实例ID：{desired_on_cfg.instance_id}",
+        f"• 到期时间：{traffic_card.expires_at or online_snapshot.expired_time or '未配置'}",
+        f"• 安全组状态：{traffic_card.security_group_status or '未配置'}",
+    ]
+
+    if traffic_card.cdt_name or traffic_card.progress_bar or traffic_card.usage:
+        summary.extend(
+            [
+                "",
+                "【流量信息】",
+                f"• 套餐名称：{traffic_card.cdt_name or '未配置'}",
+                f"• 使用进度：{traffic_card.progress_bar or '未配置'} {traffic_card.progress_percent}".rstrip(),
+                f"• 已使用流量：{traffic_card.usage or '未配置'}",
+            ]
+        )
+
+    summary.extend(["", "【执行明细】"])
+    summary.extend([f"• {line}" for line in action_logs])
+    return "\n".join(summary)
+
+
 def main() -> None:
     runtime = parse_args()
     cn_cfg, intl_cfg = runtime.cn, runtime.intl
@@ -232,7 +338,7 @@ def main() -> None:
     desired_off_client = cn_client if even_hour else intl_client
 
     logs: list[str] = []
-    logs.append(f"时间: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} (hour={now.hour})")
+    logs.append(f"当前小时={now.hour}")
     logs.append(f"计划: {desired_on_cfg.name} 开机, {desired_off_cfg.name} 关机")
 
     on_status = get_instance_status(desired_on_client, desired_on_cfg)
@@ -260,8 +366,18 @@ def main() -> None:
     logs.append(f"最终状态: {desired_on_cfg.name}={final_on}, {desired_off_cfg.name}={final_off}")
 
     success = final_on == "Running" and final_off == "Stopped"
-    title = "✅ ECS 轮换成功" if success else "❌ ECS 轮换异常"
-    message = title + "\n" + "\n".join(logs)
+    online_snapshot = get_instance_snapshot(desired_on_client, desired_on_cfg)
+    message = format_report_message(
+        success=success,
+        now=now,
+        desired_on_cfg=desired_on_cfg,
+        desired_off_cfg=desired_off_cfg,
+        final_on=final_on,
+        final_off=final_off,
+        action_logs=logs,
+        traffic_card=runtime.traffic_card,
+        online_snapshot=online_snapshot,
+    )
 
     send_telegram(runtime.tg_bot_token, runtime.tg_chat_id, message)
 

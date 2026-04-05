@@ -125,5 +125,14 @@ export INTL_ACCESS_KEY_SECRET="xxx"
 export INTL_INSTANCE_ID="i-xxxx"
 export INTL_REGION_ID="cn-hongkong"
 
+# 可选：用于丰富 Telegram 的流量/实例展示卡片
+export ALIYUN_CDT_NAME="Aliyun-CDT（47.76.68.241）"
+export ALIYUN_CDT_PROGRESS_BAR="■□□□□□□□□□□□□□□□□□□□"
+export ALIYUN_CDT_PROGRESS_PERCENT="0.05%"
+export ALIYUN_CDT_USAGE="0.1GB / 180GB"
+export ALIYUN_CDT_REGION_NAME="中国香港"
+export ALIYUN_CDT_EXPIRES_AT="2099-12-31 15:59:00"
+export ALIYUN_CDT_SECURITY_GROUP_STATUS="启用"
+
 python scripts/ecs_switch.py
 ```
