@@ -1,5 +1,7 @@
 # Aliyun Auto Switch
 
+[![执行状态](../../actions/workflows/ecs-auto-switch.yml/badge.svg)](../../actions/workflows/ecs-auto-switch.yml)
+
 用于按小时在两台阿里云 ECS 之间自动切换运行状态（一个开机、一个关机），并将执行结果推送到 Telegram。
 
 - **国内站 ECS**（`CN_*`）
