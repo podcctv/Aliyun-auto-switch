@@ -61,6 +61,7 @@ class InstanceSnapshot:
 class SecurityGroupRuleStatus:
     security_group_id: str
     ready: bool
+    mode: str = "UNKNOWN"
     detail: str = ""
 
 
@@ -294,53 +295,101 @@ def stop_instance(client: EcsClient, cfg: InstanceConfig) -> None:
         raise
 
 
+def build_security_group_request(action_name: str, cfg: InstanceConfig, security_group_id: str) -> CommonRequest:
+    req = CommonRequest()
+    req.set_domain("ecs.aliyuncs.com")
+    req.set_version("2014-05-26")
+    req.set_action_name(action_name)
+    req.set_method("POST")
+    req.add_query_param("RegionId", cfg.region_id)
+    req.add_query_param("SecurityGroupId", security_group_id)
+    return req
+
+
+def match_rule(item: dict, policy: str) -> bool:
+    return (
+        (item.get("Direction") in (None, "", "ingress"))
+        and item.get("Policy", "").lower() == policy
+        and item.get("IpProtocol", "").lower() == "all"
+        and item.get("PortRange", "") == "-1/-1"
+        and item.get("SourceCidrIp", "") == "0.0.0.0/0"
+    )
+
+
+def set_security_group_rule(
+    client: AcsClient,
+    cfg: InstanceConfig,
+    security_group_id: str,
+    action_name: str,
+    policy: str,
+) -> None:
+    req = build_security_group_request(action_name, cfg, security_group_id)
+    req.add_query_param("IpProtocol", "all")
+    req.add_query_param("PortRange", "-1/-1")
+    req.add_query_param("SourceCidrIp", "0.0.0.0/0")
+    req.add_query_param("Policy", policy)
+    req.add_query_param("Priority", "1")
+    req.add_query_param("NicType", "internet")
+    client.do_action_with_exception(req)
+
+
 def ensure_security_group_access(cfg: InstanceConfig, security_group_id: str) -> SecurityGroupRuleStatus:
     """
-    确保安全组已放行所有入站访问，避免实例开机后无法连接。
+    默认保持安全组放行所有入站访问；若之前开启过流量保护，会回收 DROP 规则。
     """
     client = AcsClient(cfg.access_key_id, cfg.access_key_secret, cfg.region_id)
-
-    describe_req = CommonRequest()
-    describe_req.set_domain("ecs.aliyuncs.com")
-    describe_req.set_version("2014-05-26")
-    describe_req.set_action_name("DescribeSecurityGroupAttribute")
-    describe_req.set_method("POST")
-    describe_req.add_query_param("RegionId", cfg.region_id)
-    describe_req.add_query_param("SecurityGroupId", security_group_id)
+    describe_req = build_security_group_request("DescribeSecurityGroupAttribute", cfg, security_group_id)
 
     try:
         response = client.do_action_with_exception(describe_req)
         data = json.loads(response.decode("utf-8"))
         permissions = data.get("Permissions", {}).get("Permission", [])
-        has_open_ingress = any(
-            (item.get("Direction") in (None, "", "ingress"))
-            and item.get("Policy", "").lower() == "accept"
-            and item.get("IpProtocol", "").lower() == "all"
-            and item.get("PortRange", "") == "-1/-1"
-            and item.get("SourceCidrIp", "") == "0.0.0.0/0"
-            for item in permissions
+        has_open_ingress = any(match_rule(item, "accept") for item in permissions)
+        has_block_ingress = any(match_rule(item, "drop") for item in permissions)
+
+        if has_block_ingress:
+            set_security_group_rule(client, cfg, security_group_id, "RevokeSecurityGroup", "drop")
+
+        if not has_open_ingress:
+            set_security_group_rule(client, cfg, security_group_id, "AuthorizeSecurityGroup", "accept")
+
+        return SecurityGroupRuleStatus(
+            security_group_id=security_group_id,
+            ready=True,
+            mode="OPEN",
+            detail="READY",
         )
-        if has_open_ingress:
-            return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=True, detail="READY")
-
-        auth_req = CommonRequest()
-        auth_req.set_domain("ecs.aliyuncs.com")
-        auth_req.set_version("2014-05-26")
-        auth_req.set_action_name("AuthorizeSecurityGroup")
-        auth_req.set_method("POST")
-        auth_req.add_query_param("RegionId", cfg.region_id)
-        auth_req.add_query_param("SecurityGroupId", security_group_id)
-        auth_req.add_query_param("IpProtocol", "all")
-        auth_req.add_query_param("PortRange", "-1/-1")
-        auth_req.add_query_param("SourceCidrIp", "0.0.0.0/0")
-        auth_req.add_query_param("Policy", "accept")
-        auth_req.add_query_param("Priority", "1")
-        auth_req.add_query_param("NicType", "internet")
-
-        client.do_action_with_exception(auth_req)
-        return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=True, detail="READY")
     except Exception as exc:
-        return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=False, detail=f"ERROR: {exc}")
+        return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=False, mode="OPEN", detail=f"ERROR: {exc}")
+
+
+def ensure_security_group_protection(cfg: InstanceConfig, security_group_id: str) -> SecurityGroupRuleStatus:
+    """
+    流量超过阈值时启用保护：添加 DROP ALL 入站规则，并回收 ACCEPT ALL 规则。
+    """
+    client = AcsClient(cfg.access_key_id, cfg.access_key_secret, cfg.region_id)
+    describe_req = build_security_group_request("DescribeSecurityGroupAttribute", cfg, security_group_id)
+
+    try:
+        response = client.do_action_with_exception(describe_req)
+        data = json.loads(response.decode("utf-8"))
+        permissions = data.get("Permissions", {}).get("Permission", [])
+        has_open_ingress = any(match_rule(item, "accept") for item in permissions)
+        has_block_ingress = any(match_rule(item, "drop") for item in permissions)
+
+        if has_open_ingress:
+            set_security_group_rule(client, cfg, security_group_id, "RevokeSecurityGroup", "accept")
+        if not has_block_ingress:
+            set_security_group_rule(client, cfg, security_group_id, "AuthorizeSecurityGroup", "drop")
+
+        return SecurityGroupRuleStatus(
+            security_group_id=security_group_id,
+            ready=True,
+            mode="PROTECTED",
+            detail="READY",
+        )
+    except Exception as exc:
+        return SecurityGroupRuleStatus(security_group_id=security_group_id, ready=False, mode="PROTECTED", detail=f"ERROR: {exc}")
 
 
 def wait_for_status(
@@ -499,7 +548,8 @@ def format_report_message(
     guard_text = " [TRAFFIC_GUARD]" if traffic_guard_triggered else ""
     if security_group_status:
         sec_id = security_group_status.security_group_id
-        sec_state = "READY" if security_group_status.ready else "ERROR"
+        mode = security_group_status.mode or "UNKNOWN"
+        sec_state = f"{mode}:{'READY' if security_group_status.ready else 'ERROR'}"
     else:
         sec_id = online_snapshot.security_group_ids[0] if online_snapshot.security_group_ids else "N/A"
         sec_state = display_value(traffic_card.security_group_status, default="UNKNOWN")
@@ -574,6 +624,15 @@ def main() -> None:
         logs.append(
             f"⚡ 动作 : {desired_on_cfg.name} 流量达到阈值（{desired_on_usage_text or f'{desired_on_usage_gb:.2f}GB'}）-> 暂停开机"
         )
+        on_snapshot = get_instance_snapshot(desired_on_client, desired_on_cfg)
+        if on_snapshot.security_group_ids:
+            sg_status = ensure_security_group_protection(desired_on_cfg, on_snapshot.security_group_ids[0])
+            if sg_status.ready:
+                logs.append(f"🛡️ 动作 : 安全组 {sg_status.security_group_id} 已启用超额保护 [OK]")
+            else:
+                logs.append(f"🛡️ 动作 : 安全组超额保护失败 [{sg_status.detail}]")
+        else:
+            logs.append("🛡️ 动作 : 未找到安全组，无法启用超额保护")
         if on_status == "Running":
             logs.append(f"⚡ 动作 : {desired_on_cfg.name} 运行中 -> 执行关机(流量保护)... [OK]")
             stop_instance(desired_on_client, desired_on_cfg)
