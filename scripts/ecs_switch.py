@@ -575,6 +575,55 @@ def format_report_message(
     return f"<pre>{escape(chr(10).join(plain_lines))}</pre>"
 
 
+def decide_switch_strategy(
+    now: datetime,
+    cn_status: str,
+    intl_status: str,
+    cn_cfg: InstanceConfig,
+    intl_cfg: InstanceConfig,
+    cn_client: EcsClient,
+    intl_client: EcsClient,
+) -> tuple[InstanceConfig, EcsClient, InstanceConfig, EcsClient, str]:
+    """
+    优先根据“上次成功状态”推导本次轮转目标：
+    - 若当前仅一台运行，则认为该状态来自上次成功执行，本次切换到另一台运行。
+    - 若当前两台都运行或都停止，则无法可靠推断上次成功状态，回退到按小时奇偶策略。
+    """
+    cn_running = cn_status == "Running"
+    intl_running = intl_status == "Running"
+
+    if cn_running and not intl_running:
+        return (
+            intl_cfg,
+            intl_client,
+            cn_cfg,
+            cn_client,
+            "依据上次成功状态推断：当前CN运行/HK停止 -> 本次执行HK开机，CN关机",
+        )
+
+    if intl_running and not cn_running:
+        return (
+            cn_cfg,
+            cn_client,
+            intl_cfg,
+            intl_client,
+            "依据上次成功状态推断：当前HK运行/CN停止 -> 本次执行CN开机，HK关机",
+        )
+
+    even_hour = now.hour % 2 == 0
+    desired_on_cfg = intl_cfg if even_hour else cn_cfg
+    desired_on_client = intl_client if even_hour else cn_client
+    desired_off_cfg = cn_cfg if even_hour else intl_cfg
+    desired_off_client = cn_client if even_hour else intl_client
+    return (
+        desired_on_cfg,
+        desired_on_client,
+        desired_off_cfg,
+        desired_off_client,
+        "当前状态无法推断上次成功策略（两台同为运行或停止），回退到按小时奇偶策略",
+    )
+
+
 def main() -> None:
     runtime = parse_args()
     cn_cfg, intl_cfg = runtime.cn, runtime.intl
@@ -586,15 +635,21 @@ def main() -> None:
     intl_client = create_client(intl_cfg)
 
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    even_hour = now.hour % 2 == 0
-
-    desired_on_cfg = intl_cfg if even_hour else cn_cfg
-    desired_on_client = intl_client if even_hour else cn_client
-    desired_off_cfg = cn_cfg if even_hour else intl_cfg
-    desired_off_client = cn_client if even_hour else intl_client
+    cn_status_now = get_instance_status(cn_client, cn_cfg)
+    intl_status_now = get_instance_status(intl_client, intl_cfg)
+    desired_on_cfg, desired_on_client, desired_off_cfg, desired_off_client, strategy_reason = decide_switch_strategy(
+        now=now,
+        cn_status=cn_status_now,
+        intl_status=intl_status_now,
+        cn_cfg=cn_cfg,
+        intl_cfg=intl_cfg,
+        cn_client=cn_client,
+        intl_client=intl_client,
+    )
 
     logs: list[str] = [
-        f"🔍 策略 : 设阈 {runtime.traffic_limit_gb:g}G | 计划: {'HK' if desired_on_cfg.name == '国际站' else 'CN'}开机, {'CN' if desired_off_cfg.name == '国内站' else 'HK'}关机"
+        f"🔍 策略 : 设阈 {runtime.traffic_limit_gb:g}G | {strategy_reason}",
+        f"📌 计划 : {'HK' if desired_on_cfg.name == '国际站' else 'CN'}开机, {'CN' if desired_off_cfg.name == '国内站' else 'HK'}关机",
     ]
 
     cn_usage_gb = parse_usage_gb(runtime.cn_traffic_usage)
@@ -611,8 +666,8 @@ def main() -> None:
         intl_usage_gb = auto_intl_usage_gb
         runtime.intl_traffic_usage = format_usage_gb(auto_intl_usage_gb, runtime.traffic_limit_gb)
 
-    desired_on_usage_gb = intl_usage_gb if even_hour else cn_usage_gb
-    desired_on_usage_text = runtime.intl_traffic_usage if even_hour else runtime.cn_traffic_usage
+    desired_on_usage_gb = intl_usage_gb if desired_on_cfg.name == "国际站" else cn_usage_gb
+    desired_on_usage_text = runtime.intl_traffic_usage if desired_on_cfg.name == "国际站" else runtime.cn_traffic_usage
     traffic_guard_triggered = (
         desired_on_usage_gb is not None and desired_on_usage_gb >= runtime.traffic_limit_gb
     )
