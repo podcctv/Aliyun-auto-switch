@@ -1,116 +1,162 @@
-# Aliyun Auto Switch (GitHub Actions)
+# Aliyun Auto Switch
 
-这个项目用于**按小时轮流**控制两台阿里云 ECS：
+用于按小时在两台阿里云 ECS 之间自动切换运行状态（一个开机、一个关机），并将执行结果推送到 Telegram。
 
-- 阿里云国际站 ECS
-- 阿里云国内站 ECS
+- **国内站 ECS**（`CN_*`）
+- **国际站 ECS**（`INTL_*`）
 
-目标行为：
+核心策略：
 
-1. 每小时根据当前小时奇偶决定哪台应当开机。
-2. 切换时先确保目标机器开机成功。
-3. 再执行另一台关机并确认成功。
-4. 把执行结果推送到 Telegram。
-5. 若待开机实例流量达到阈值（默认 `180GB`），触发流量保护：该实例保持关机，待流量回落后再恢复自动开机。
-
----
-
-## 工作流说明
-
-GitHub Actions 每小时触发一次（也可手动触发）：
-
-- 偶数小时：国际站开机，国内站关机
-- 奇数小时：国内站开机，国际站关机
-
-时区使用 `Asia/Shanghai`。
+1. 按 `Asia/Shanghai` 时区判断当前小时奇偶。  
+2. 偶数小时：国际站开机，国内站关机。  
+3. 奇数小时：国内站开机，国际站关机。  
+4. 切换时先确认目标实例可开机，再执行另一台关机。  
+5. 若待开机实例流量达到阈值（默认 `180GB`），触发流量保护并阻止开机。  
 
 ---
 
-## Secrets 配置（非常重要）
+## 1. 当前部署方式（GitHub Actions）
+
+本仓库已配置工作流：`.github/workflows/ecs-auto-switch.yml`
+
+触发方式：
+
+- `schedule`: `0 * * * *`（每小时第 0 分钟执行一次）
+- `workflow_dispatch`: 支持手动触发
+
+执行流程：
+
+1. Checkout 代码
+2. 安装 Python 3.11 与依赖
+3. 校验必填 secrets 是否存在
+4. 运行 `python scripts/ecs_switch.py`
+
+> 当前 job 绑定的 environment 名称是 **`env`**。如果你使用 Environment secrets，必须把所需 secrets 放在这个 environment（或修改 workflow 中的 `environment` 名称）。
+
+---
+
+## 2. 一次性部署步骤（推荐）
+
+### 步骤 1：Fork / 上传仓库代码
+
+把本仓库代码放到你的 GitHub 仓库。
+
+### 步骤 2：配置 GitHub Secrets
 
 路径：`Settings -> Secrets and variables -> Actions`
 
-### 1) 推荐：Repository secrets（最简单）
+你可以二选一：
 
-把下面 10 个 key 都配置在 **Repository secrets** 下：
+- **方式 A（推荐）**：全部放到 **Repository secrets**
+- **方式 B**：放到 **Environment secrets**，但要保证 workflow 绑定的 environment 能读到这些 secrets（默认是 `env`）
 
-#### Telegram
+### 步骤 3：填写必填参数（10 个）
+
+#### Telegram（2 个）
 
 - `TG_BOT_TOKEN`
 - `TG_CHAT_ID`
 
-#### 国内站 ECS
+#### 国内站 ECS（4 个）
 
 - `CN_ACCESS_KEY_ID`
 - `CN_ACCESS_KEY_SECRET`
 - `CN_INSTANCE_ID`
 - `CN_REGION_ID`
 
-#### 国际站 ECS
+#### 国际站 ECS（4 个）
 
 - `INTL_ACCESS_KEY_ID`
 - `INTL_ACCESS_KEY_SECRET`
 - `INTL_INSTANCE_ID`
 - `INTL_REGION_ID`
 
-### 2) 你截图中的方式：Environment secrets
+### 步骤 4：手动触发一次验证
 
-你当前是把 key 配在 **Environment secrets** 里（而且分在多个 environment）。
-这会导致本工作流拿不到部分 secret，传给脚本就是空字符串，最终报：
-`InvalidCredentials`。
+打开 `Actions -> ECS Auto Switch -> Run workflow` 手动运行一次，确认：
 
-> 原因：GitHub Actions 的一个 job 一次只能绑定 **一个** environment。
+- 无 `InvalidCredentials`
+- Telegram 能收到报告
+- 实例启停符合当前小时策略
 
-如果你坚持使用 Environment secrets，请把以上 10 个 key 放到**同一个** environment，再让 job 绑定这个 environment；否则会缺参。
+### 步骤 5：观察定时执行
 
-当前仓库的 workflow 已默认绑定 `env` 这个 environment（见 `.github/workflows/ecs-auto-switch.yml`），
-所以你在截图里使用 `env` 作为 Environment 名称是可行的。
-
----
-
-## 常见报错：`InvalidCredentials`
-
-如果报错类似：
-
-- `Error: InvalidCredentials`
-- `Please set up ... ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET`
-
-优先检查：
-
-1. 对应 secret 是否为空（尤其是配置在 Environment secrets 但 job 未绑定该 environment 的情况）。
-2. `CN_*` / `INTL_*` 命名是否和 workflow 完全一致。
-3. AccessKey 是否有 ECS 的操作权限。
-
-脚本现在支持两种传参来源（任选其一）：
-
-- 命令行参数（`--cn-access-key-id` 等）
-- 环境变量（`CN_*` / `INTL_*` / `TG_*`）
-
-并且会在缺参时直接报出明确提示。
+后续将每小时自动执行一次。
 
 ---
 
-## 本地运行（参数方式）
+## 3. 参数配置说明（完整）
+
+脚本支持两种传参方式：
+
+- 命令行参数（`--xxx`）
+- 环境变量（`XXX`）
+
+优先级：**命令行参数 > 环境变量**。
+
+### 3.1 必填参数
+
+| 作用 | CLI 参数 | 环境变量 | 示例 |
+|---|---|---|---|
+| Telegram Bot Token | `--tg-bot-token` | `TG_BOT_TOKEN` | `123456:ABC...` |
+| Telegram Chat ID | `--tg-chat-id` | `TG_CHAT_ID` | `-100xxxxxxxxxx` |
+| 国内站 AK | `--cn-access-key-id` | `CN_ACCESS_KEY_ID` | `LTAI...` |
+| 国内站 SK | `--cn-access-key-secret` | `CN_ACCESS_KEY_SECRET` | `xxxx` |
+| 国内站实例ID | `--cn-instance-id` | `CN_INSTANCE_ID` | `i-abc123` |
+| 国内站地域 | `--cn-region-id` | `CN_REGION_ID` | `cn-hongkong` |
+| 国际站 AK | `--intl-access-key-id` | `INTL_ACCESS_KEY_ID` | `LTAI...` |
+| 国际站 SK | `--intl-access-key-secret` | `INTL_ACCESS_KEY_SECRET` | `xxxx` |
+| 国际站实例ID | `--intl-instance-id` | `INTL_INSTANCE_ID` | `i-def456` |
+| 国际站地域 | `--intl-region-id` | `INTL_REGION_ID` | `ap-southeast-1` |
+
+> 兼容项：国内站/国际站 AK/SK 也可从 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET` 回退读取，但**不建议**与 `CN_*`、`INTL_*` 混用。
+
+### 3.2 可选参数
+
+| 作用 | CLI 参数 | 环境变量 | 默认值 |
+|---|---|---|---|
+| 开机流量阈值（GB） | `--traffic-limit-gb` | `TRAFFIC_LIMIT_GB` | `180` |
+| 国内站流量文本 | `--cn-traffic-usage` | `CN_TRAFFIC_USAGE` | 空 |
+| 国际站流量文本 | `--intl-traffic-usage` | `INTL_TRAFFIC_USAGE` | 空 |
+| CDT 卡片名称 | `--cdt-name` | `ALIYUN_CDT_NAME` | 空 |
+| CDT 进度条 | `--cdt-progress-bar` | `ALIYUN_CDT_PROGRESS_BAR` | 空 |
+| CDT 百分比 | `--cdt-progress-percent` | `ALIYUN_CDT_PROGRESS_PERCENT` | 空 |
+| CDT 用量 | `--cdt-usage` | `ALIYUN_CDT_USAGE` | 空 |
+| CDT 地域名 | `--cdt-region-name` | `ALIYUN_CDT_REGION_NAME` | 空 |
+| CDT 到期时间 | `--cdt-expires-at` | `ALIYUN_CDT_EXPIRES_AT` | 空 |
+| CDT 安全组状态 | `--cdt-security-group-status` | `ALIYUN_CDT_SECURITY_GROUP_STATUS` | 空 |
+
+---
+
+## 4. GitHub Actions 示例配置
+
+工作流已内置大部分配置，通常只需要填 secrets 即可运行。
+
+如果你想改 environment 名称，例如改为 `prod`：
+
+1. 修改 `.github/workflows/ecs-auto-switch.yml` 中：
+
+```yaml
+jobs:
+  switch:
+    environment: prod
+```
+
+2. 在 GitHub 中创建 `prod` environment，并把同一套 secrets 配进去。
+
+---
+
+## 5. 本地部署 / 本地调试
+
+### 5.1 安装依赖
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-python scripts/ecs_switch.py \
-  --tg-bot-token "xxx" \
-  --tg-chat-id "xxx" \
-  --cn-access-key-id "xxx" \
-  --cn-access-key-secret "xxx" \
-  --cn-instance-id "i-xxxx" \
-  --cn-region-id "cn-hongkong" \
-  --intl-access-key-id "xxx" \
-  --intl-access-key-secret "xxx" \
-  --intl-instance-id "i-xxxx" \
-  --intl-region-id "cn-hongkong"
 ```
 
-## 本地运行（环境变量方式）
+### 5.2 用环境变量运行（推荐）
 
 ```bash
 export TG_BOT_TOKEN="xxx"
@@ -124,104 +170,79 @@ export CN_REGION_ID="cn-hongkong"
 export INTL_ACCESS_KEY_ID="xxx"
 export INTL_ACCESS_KEY_SECRET="xxx"
 export INTL_INSTANCE_ID="i-xxxx"
-export INTL_REGION_ID="cn-hongkong"
+export INTL_REGION_ID="ap-southeast-1"
 
-# 可选：用于丰富 Telegram 的流量/实例展示卡片
-export ALIYUN_CDT_NAME="Aliyun-CDT（47.76.68.241）"
-export ALIYUN_CDT_PROGRESS_BAR="■□□□□□□□□□□□□□□□□□□□"
-export ALIYUN_CDT_PROGRESS_PERCENT="0.05%"
-export ALIYUN_CDT_USAGE="0.1GB / 180GB"
-export ALIYUN_CDT_REGION_NAME="中国香港"
-export ALIYUN_CDT_EXPIRES_AT="2099-12-31 15:59:00"
-export ALIYUN_CDT_SECURITY_GROUP_STATUS="启用"
-
-# 可选：用于展示国内站/国际站各自流量（支持如 12.3GB / 180GB）
+# 可选
+export TRAFFIC_LIMIT_GB="180"
 export CN_TRAFFIC_USAGE="12.3GB / 180GB"
 export INTL_TRAFFIC_USAGE="85.0GB / 180GB"
-
-# 可选：开机流量阈值（默认 180）
-export TRAFFIC_LIMIT_GB="180"
 
 python scripts/ecs_switch.py
 ```
 
-## Telegram 报告优化
+### 5.3 用命令行参数运行
 
-脚本会在通知中展示：
-
-- 使用 emoji 的实例状态（🟢运行 / 🔴停止）
-- 国内站与国际站各自流量
-- 流量阈值与流量保护触发状态（🚫）
-
----
-
-## 如何查询「国内站流量 / 国际站流量」
-
-当前脚本会优先使用 AK/SK 通过 CDT API（`ListCdtInternetTraffic`）自动查询每个账号当月流量。
-当 API 查询失败时，才会回退到以下两个变量（用于阈值判断和通知展示）：
-
-- `CN_TRAFFIC_USAGE`（国内站）
-- `INTL_TRAFFIC_USAGE`（国际站）
-
-格式建议：`已用GB / 阈值GB`，例如：`12.3GB / 180GB`。
-
-### 方式 A：控制台手工读取（最稳妥）
-
-1. 登录对应账号（国内站账号 / 国际站账号）。
-2. 进入 **费用与成本** 或 **云数据传输 CDT** 流量包页面。
-3. 读取当前已用流量，写入 `CN_TRAFFIC_USAGE` / `INTL_TRAFFIC_USAGE`。
-
-适合先验证自动切换流程，确认逻辑正确后再做 API 自动化。
-
-### 方式 B：脚本自动查询（默认）
-
-当前 `scripts/ecs_switch.py` 内已内置自动查询逻辑：
-
-1. 使用国内站 AK/SK 查询国内站账号流量。
-2. 使用国际站 AK/SK 查询国际站账号流量。
-3. 自动写入报告展示格式：`xx.xxGB / 阈值GB`。
-
-如果自动查询失败，会自动回退到 `CN_TRAFFIC_USAGE` / `INTL_TRAFFIC_USAGE`（如有配置）。
+```bash
+python scripts/ecs_switch.py \
+  --tg-bot-token "xxx" \
+  --tg-chat-id "xxx" \
+  --cn-access-key-id "xxx" \
+  --cn-access-key-secret "xxx" \
+  --cn-instance-id "i-xxxx" \
+  --cn-region-id "cn-hongkong" \
+  --intl-access-key-id "xxx" \
+  --intl-access-key-secret "xxx" \
+  --intl-instance-id "i-xxxx" \
+  --intl-region-id "ap-southeast-1" \
+  --traffic-limit-gb "180"
+```
 
 ---
 
-## 安全组联动策略（超量关机 + 限制仅 SSH 22）
+## 6. 常见问题排查
 
-推荐采用「双安全组切换」而不是在运行时频繁增删规则：
+### 6.1 `InvalidCredentials`
 
-- `normal-sg`：正常业务安全组（当前放行业务端口）
-- `lockdown-sg`：仅放行 `22/tcp`，其余入/出站全部拒绝
+通常是以下问题：
 
-### 建议流程
+1. Secret 没填或填错（空值、拷贝时有空格/换行）
+2. Environment 不匹配（workflow 用 `env`，但你把 secrets 放在别的 environment）
+3. AccessKey 没有 ECS 权限
+4. 把 AccessKeyId / AccessKeySecret 填反
 
-1. **超量时（达到 `TRAFFIC_LIMIT_GB`）**
-   - 目标实例保持/切换为关机。
-   - 将实例加入 `lockdown-sg`（并移除 `normal-sg`）。
-2. **配额恢复后（低于阈值）**
-   - 恢复 `normal-sg`（移除 `lockdown-sg`）。
-   - 再执行开机。
+### 6.2 工作流里 Secret 读取为空
 
-### 为什么推荐双安全组
+优先检查：
 
-- 规则结构清晰，便于审计。
-- 误操作风险低，不会把临时规则长期遗留在线上。
-- 回滚简单，直接切回 `normal-sg`。
+- `jobs.switch.environment` 与实际 environment 名称是否一致
+- 该 environment 是否允许当前分支触发
+- 是否是 fork/机器人触发导致 secrets 不可用
+
+### 6.3 流量保护触发后为什么不开机
+
+当待开机实例流量 `>= TRAFFIC_LIMIT_GB` 时，脚本会阻止其开机，这是预期行为。
+你可以：
+
+- 等下个计费周期回落后自动恢复
+- 临时提高 `TRAFFIC_LIMIT_GB`
 
 ---
 
-## 配额恢复后自动解除安全组并开机（实现建议）
+## 7. 安全建议
 
-当前仓库已具备：
+- 给 AK/SK 最小权限（仅允许必要的 ECS / CDT 读取与控制）
+- 不要把 AK/SK 写入仓库文件
+- 仅通过 GitHub Secrets 管理敏感参数
+- 定期轮换 AccessKey
 
-- 达到阈值时阻止开机（流量保护）
-- 低于阈值后自动恢复开机
+---
 
-如果你希望把「安全组切换」也自动化，建议在 GitHub Actions 新增一个前置步骤（或扩展 `ecs_switch.py`）：
+## 8. 目录结构
 
-1. 读取国内站/国际站当前流量
-2. 判断是否超阈值
-3. 超阈值则切换到 `lockdown-sg`
-4. 低于阈值则恢复 `normal-sg`
-5. 最后调用 `ecs_switch.py` 执行开/关机与通知
-
-这样可以保证「网络封禁状态」与「开关机状态」始终一致。
+```text
+.
+├── .github/workflows/ecs-auto-switch.yml
+├── scripts/ecs_switch.py
+├── requirements.txt
+└── README.md
+```
