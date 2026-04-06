@@ -1,6 +1,9 @@
 # Aliyun Auto Switch
 
 [![执行状态](../../actions/workflows/ecs-auto-switch.yml/badge.svg)](../../actions/workflows/ecs-auto-switch.yml)
+[![执行次数](https://img.shields.io/github/actions/workflow/run-count/HuaYuNoYume/Aliyun-auto-switch/ecs-auto-switch.yml?label=%E6%89%A7%E8%A1%8C%E6%AC%A1%E6%95%B0)](../../actions/workflows/ecs-auto-switch.yml)
+[![最近执行](https://img.shields.io/github/actions/workflow/last-run/HuaYuNoYume/Aliyun-auto-switch/ecs-auto-switch.yml?label=%E6%9C%80%E8%BF%91%E6%89%A7%E8%A1%8C)](../../actions/workflows/ecs-auto-switch.yml)
+[![提交活跃度](https://img.shields.io/github/commit-activity/m/HuaYuNoYume/Aliyun-auto-switch?label=%E6%9C%88%E6%8F%90%E4%BA%A4%E6%AC%A1%E6%95%B0)](../../commits)
 
 用于按小时在两台阿里云 ECS 之间自动切换运行状态（一个开机、一个关机），并将执行结果推送到 Telegram。
 
